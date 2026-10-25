@@ -11,15 +11,9 @@
     <header><h1>Communicator</h1><span id="connection" role="status">Chưa kết nối</span></header>
     <form id="connect">
       <label>Dashboard token<input id="token" type="password" autocomplete="off" required></label>
-      <label>Dự án<select id="project"><option value="">Chat trực tiếp</option></select></label>
-      <button>Kết nối</button><button id="new-chat" type="button">Chat mới</button>
+      <label>Dự án<select id="project"><option value="">Dự án mới</option></select></label>
+      <button>Kết nối</button><button id="new-chat" type="button">Dự án mới</button>
     </form>
-    <details><summary>Thêm dự án</summary><form id="new-project">
-      <label>ID<input name="project_id" required pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,79}"></label>
-      <label>Tên<input name="title" required></label>
-      <label>Repository<input name="repository_path" placeholder="/workspace/repositories/project"></label>
-      <button>Tạo dự án</button>
-    </form></details>
     <div id="error" role="alert" hidden></div>
     <section id="conversation" aria-live="polite" aria-label="Hội thoại"><p id="welcome">Gửi tin nhắn để bắt đầu.</p></section>
     <form id="message"><label class="composer">Tin nhắn<textarea name="message" rows="3" maxlength="20000" required placeholder="Bạn muốn làm gì?"></textarea></label>

@@ -23,6 +23,7 @@ import httpx
 import pytest
 
 from fixtures.decision_fixture import decision_endpoint
+from orchestrator.dispatcher.engine import identifier
 
 
 pytestmark = pytest.mark.skipif(
@@ -106,12 +107,8 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
     shutil.copy2(ROOT / "tests" / "fixtures" / "qwen_fixture.py", fixture)
     fixture.chmod(0o700)
     workspace, data = tmp_path / "workspace", tmp_path / "data"
-    repository = workspace / "repositories" / "fixture"
-    repository.mkdir(parents=True)
-    subprocess.run(["git", "init", "-q", str(repository)], check=True)
-    (repository / "README.md").write_text("Fixture project\n")
-    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(repository), "-c", "user.name=Fixture", "-c", "user.email=fixture@localhost", "commit", "-qm", "Fixture baseline"], check=True)
+    message_id = str(uuid4())
+    pid = identifier(message_id, "project")
     internal_token, dashboard_token = uuid4().hex, uuid4().hex
     environment = {
         **os.environ,
@@ -137,13 +134,8 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             assert client.get("/api/projects").status_code == 401
             assert client.post("/store/items/search", headers=headers,
                                json={"namespace_prefix": ["coding"], "limit": 10}).status_code in {401, 403}
-            assert client.post("/api/projects", headers=headers, json={
-                "project_id": "fixture", "title": "Fixture", "repository_path": str(repository),
-            }).status_code == 202
-            wait_for(lambda: client.get("/api/projects/fixture/snapshot", headers=headers).status_code == 200,
-                     description="project registration", process=process, logfile=first_log)
             with client.stream("POST", "/api/chat/stream", headers=headers, timeout=60, json={
-                "project_id": "fixture", "messages": [{"id": str(uuid4()), "role": "user",
+                "messages": [{"id": message_id, "role": "user",
                 "content": "Build independent API and UI, then integrate and accept both."}],
             }) as response:
                 assert response.status_code == 200
@@ -153,7 +145,7 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             assert any('"type": "reply"' in line for line in frames), frames
 
             def completed():
-                response = client.get("/api/projects/fixture/snapshot", headers=headers)
+                response = client.get(f"/api/projects/{pid}/snapshot", headers=headers)
                 response.raise_for_status()
                 snapshot = response.json()
                 tasks = snapshot["tasks"]
@@ -164,33 +156,35 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             snapshot = wait_for(completed, timeout=60, description="all seven tasks CLOSED",
                                 process=process, logfile=first_log)
             tasks = snapshot["tasks"]
-            assert len([r for r in decision_requests if not r.get("stream")]) == 7
+            assert snapshot["project"]["repository_path"] == str(workspace / pid)
+            assert len([r for r in decision_requests if r.get("response_format")]) == 7
+            assert any(not r.get("stream") and not r.get("response_format") for r in decision_requests)
             assert any(r.get("stream") for r in decision_requests)
             execute = [task for task in tasks if task["agent"] == "EXECUTE"]
             assert len({task["assigned_worker"] for task in execute}) == 2
             assert all(task["integrated"] and task["commit_sha"] for task in execute)
             verify = next(task for task in tasks if task["agent"] == "VERIFY_INTEGRATE")
             assert set(verify["depends_on"]) == {task["task_id"] for task in execute}
-            integration = workspace / "worktrees" / "fixture" / "integration"
+            integration = workspace / "worktrees" / pid / "integration"
             assert (integration / "api.txt").read_text() == "api implemented\n"
             assert (integration / "ui.txt").read_text() == "ui implemented\n"
             assert snapshot["notifications"]
-            assert not (data / "private" / "fixture" / "COMMUNICATOR").exists()
+            assert not (data / "private" / pid / "COMMUNICATOR").exists()
             for task in tasks:
                 if task["agent"] == "COMMUNICATOR":
                     continue  # Communicator calls ChatOpenAI without a CLI Work pass.
-                runs = list((data / "private" / "fixture" / task["agent"] / task["task_id"]).iterdir())
+                runs = list((data / "private" / pid / task["agent"] / task["task_id"]).iterdir())
                 assert len(runs) == 1
                 assert (runs[0] / "work.jsonl").is_file()
                 assert (runs[0] / "decision.jsonl").is_file()
             intervals = []
             for task in execute:
-                work_log = next((data / "private" / "fixture" / "EXECUTE" / task["task_id"]).glob("*/work.jsonl"))
+                work_log = next((data / "private" / pid / "EXECUTE" / task["task_id"]).glob("*/work.jsonl"))
                 events = [json.loads(json.loads(line)["line"]) for line in work_log.read_text().splitlines()]
                 intervals.append((next(e["at"] for e in events if e.get("fixture_phase") == "start"),
                                   next(e["at"] for e in events if e.get("fixture_phase") == "end")))
             assert max(start for start, _ in intervals) < min(end for _, end in intervals), "Execute work passes did not overlap"
-            patches = sorted((workspace / "artifacts" / "fixture" / "patches").glob("*.patch"))
+            patches = sorted((workspace / "artifacts" / pid / "patches").glob("*.patch"))
             assert len(patches) == 3
             preserved_patches = {path: path.read_bytes() for path in patches}
             # Technical graphs run locally in worker processes, without server threads.
@@ -204,7 +198,7 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
         with supervisor(run_root, environment, restart_log) as restarted:
             wait_for(lambda: client.get("/ok", headers=trusted).status_code == 200,
                      description="restarted Agent Server", process=restarted, logfile=restart_log)
-            restored = wait_for(lambda: client.get("/api/projects/fixture/snapshot", headers=headers).json(),
+            restored = wait_for(lambda: client.get(f"/api/projects/{pid}/snapshot", headers=headers).json(),
                                 description="restored Store snapshot", process=restarted, logfile=restart_log)
             assert {task["task_id"] for task in restored["tasks"]} == task_ids
             assert all(task["status"] == "CLOSED" for task in restored["tasks"])
@@ -212,4 +206,4 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             assert (integration / "ui.txt").read_text() == "ui implemented\n"
             assert all(path.read_bytes() == content for path, content in preserved_patches.items())
         assert restarted.returncode == 0, restart_log.read_text()[-6000:]
-        assert len([r for r in decision_requests if not r.get("stream")]) == 7
+        assert len([r for r in decision_requests if r.get("response_format")]) == 7

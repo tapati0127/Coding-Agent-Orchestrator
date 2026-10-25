@@ -215,6 +215,41 @@ def test_chat_sdk_proxy_streams_subgraph_events_without_runtime_token(web):
     assert call.kwargs["stream_mode"] == ["messages-tuple", "custom"]
     assert call.kwargs["on_disconnect"] == "cancel"
     assert "task" not in call.kwargs["input"]
+    assert call.kwargs["input"]["project_id"]
+    assert call.kwargs["input"]["create_project"] is True
+    assert sdk.threads.create.call_args.kwargs["metadata"]["project_id"] == call.kwargs["input"]["project_id"]
+
+
+def test_retry_without_thread_uses_same_automatic_project_id(web):
+    client, _ = web
+    async def parts(*args, **kwargs):
+        if False:
+            yield
+    sdk = SimpleNamespace(threads=SimpleNamespace(create=AsyncMock(return_value={"thread_id": str(uuid4())})),
+                          runs=SimpleNamespace(stream=Mock(side_effect=parts)))
+    app.dependency_overrides[get_chat_client] = lambda: sdk
+    body = {"messages": [{"id": str(uuid4()), "role": "user", "content": "Build a portal"}]}
+    for _ in range(2):
+        assert client.post("/api/chat/stream", headers=AUTH, json=body).status_code == 200
+    calls = sdk.runs.stream.call_args_list
+    assert calls[0].kwargs["input"]["project_id"] == calls[1].kwargs["input"]["project_id"]
+
+
+def test_existing_project_chat_does_not_create_another_project(web):
+    client, _ = web
+    async def parts(*args, **kwargs):
+        if False:
+            yield
+    thread_id = str(uuid4())
+    sdk = SimpleNamespace(threads=SimpleNamespace(get=AsyncMock(return_value={
+        "thread_id": thread_id, "metadata": {"dashboard_chat": True, "project_id": "existing"}})),
+        runs=SimpleNamespace(stream=Mock(side_effect=parts)))
+    app.dependency_overrides[get_chat_client] = lambda: sdk
+    response = client.post("/api/chat/stream", headers=AUTH, json={"thread_id": thread_id,
+        "messages": [{"id": str(uuid4()), "role": "user", "content": "Continue"}]})
+    assert response.status_code == 200
+    assert sdk.runs.stream.call_args.kwargs["input"]["project_id"] == "existing"
+    assert sdk.runs.stream.call_args.kwargs["input"]["create_project"] is False
 
 
 def test_chat_cannot_resume_unrelated_thread_or_inject_agent_state(web):

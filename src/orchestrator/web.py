@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from orchestrator.queues import get_dispatcher
 from orchestrator.config import Settings
 from orchestrator.dispatcher.main import dispatcher_lifespan
+from orchestrator.dispatcher.engine import identifier
 from langgraph.runtime import get_runtime
 from langgraph_sdk import get_client
 
@@ -168,19 +169,24 @@ async def chat_stream(body: ChatInput, request: Request,
     if body.thread_id:
         thread = await client.threads.get(str(body.thread_id))
         metadata = thread.get("metadata", {})
-        if not metadata.get("dashboard_chat") or metadata.get("project_id") != body.project_id:
+        if not metadata.get("dashboard_chat") or (body.project_id is not None and metadata.get("project_id") != body.project_id):
             raise HTTPException(403, "Thread does not belong to this project chat")
+        pid = metadata.get("project_id")
+        create_project = metadata.get("create_project", False)
     else:
-        thread = await client.threads.create(metadata={"dashboard_chat": True, "project_id": body.project_id})
+        pid = body.project_id or identifier(str(body.messages[-1].id), "project")
+        create_project = body.project_id is None
+        thread = await client.threads.create(metadata={"dashboard_chat": True, "project_id": pid,
+                                                        "create_project": create_project})
     thread_id = thread["thread_id"]
 
     async def stream():
-        yield "event: thread\ndata: " + json.dumps({"thread_id": thread_id}) + "\n\n"
+        yield "event: thread\ndata: " + json.dumps({"thread_id": thread_id, "project_id": pid}) + "\n\n"
         try:
             async for part in client.runs.stream(
                 thread_id, "communicator",
                 input={"messages": [row.model_dump(mode="json") for row in body.messages],
-                       "project_id": body.project_id},
+                       "project_id": pid, "create_project": create_project},
                 stream_mode=["messages-tuple", "custom"], stream_subgraphs=True,
                 on_disconnect="cancel", multitask_strategy="interrupt",
             ):

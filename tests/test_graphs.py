@@ -30,7 +30,8 @@ async def test_communicator_task_calls_chat_llm_with_typed_messages(monkeypatch,
         expected.pop("human_request")
         expected["nodes"] = [{"id": "ask", "node_type": "HUMAN_APPROVAL", "target_agent": "COMMUNICATOR",
                               "title": "Who will use it?"}]
-    runtime = SimpleNamespace(ainvoke=AsyncMock(return_value=expected))
+    runtime = SimpleNamespace(chat=AsyncMock(return_value=AIMessage(content="Who will use it?")),
+                              ainvoke=AsyncMock(return_value=expected))
     monkeypatch.setattr(communicator_module, "DecisionRunner", lambda: runtime)
     monkeypatch.setattr(common, "QwenRunner", Mock(side_effect=AssertionError("No Qwen Code for Communicator")))
     output = await communicator.ainvoke({
@@ -42,10 +43,12 @@ async def test_communicator_task_calls_chat_llm_with_typed_messages(monkeypatch,
     assert isinstance(output["messages"][0], HumanMessage)
     assert len(output["messages"]) == 1  # Replies are streamed, not returned to messages.
     runtime.ainvoke.assert_awaited_once()
+    runtime.chat.assert_awaited_once()
     messages, schema = runtime.ainvoke.call_args.args
     assert isinstance(messages[0], SystemMessage)
-    assert isinstance(messages[-1], HumanMessage)
-    assert messages[-1].content == "Build a portal"
+    assert any(isinstance(message, HumanMessage) and message.content == "Build a portal" for message in messages)
+    assert messages[-2].content == "Who will use it?"
+    assert "Structure pass" in messages[-1].content
     assert schema["title"] == "TaskGraphOutput"
     TaskGraphOutput.model_validate(output["result"])
 
@@ -106,7 +109,7 @@ async def test_communicator_requires_a_user_message_before_calling_llm(monkeypat
 
 
 async def test_communicator_rejects_spoofed_task_identity(monkeypatch):
-    runtime = SimpleNamespace(ainvoke=AsyncMock(return_value={
+    runtime = SimpleNamespace(chat=AsyncMock(return_value=AIMessage(content="Requirements ready")), ainvoke=AsyncMock(return_value={
         "project_id": "demo", "source_task_id": "other-task", "producer_agent": "COMMUNICATOR",
         "execution_chain_id": "chain-1", "source_result": {"outcome": "SUCCESS"},
     }))

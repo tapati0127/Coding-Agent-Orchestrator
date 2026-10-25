@@ -26,6 +26,31 @@ def workspace(tmp_path):
     return manager, repository
 
 
+def test_create_project_has_matching_directory_and_committed_baseline_and_preserves_retry(tmp_path):
+    manager = WorkspaceManager(tmp_path / "workspace", tmp_path / "data")
+    project = manager.create("new-project")
+    repository = Path(project["repository_path"])
+    assert repository == manager.root / "new-project"
+    assert git(repository, "rev-parse", "HEAD") == project["base_commit"]
+    (repository / "keep.txt").write_text("preserve this")
+    assert manager.create("new-project") == project
+    assert (repository / "keep.txt").read_text() == "preserve this"
+    assert manager.provision("new-project", "execute-01", task_id="task")["base_commit"] == project["base_commit"]
+
+
+def test_create_refuses_existing_files_or_symlinked_directory(tmp_path):
+    manager = WorkspaceManager(tmp_path / "workspace", tmp_path / "data")
+    repository = manager.root / "existing"
+    repository.mkdir(parents=True)
+    (repository / "keep.txt").write_text("preserve")
+    with pytest.raises(WorkspaceError, match="not empty"):
+        manager.create("existing")
+    assert not (repository / ".git").exists()
+    (manager.root / "linked").symlink_to(repository)
+    with pytest.raises(WorkspaceError, match="Symlinked"):
+        manager.create("linked")
+
+
 def test_isolated_worktrees_capture_and_integrate(workspace):
     manager, repository = workspace
     first = manager.provision("demo", "execute-01", task_id="first")

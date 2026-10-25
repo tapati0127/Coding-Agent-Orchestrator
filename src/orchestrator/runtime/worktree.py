@@ -109,6 +109,36 @@ class WorkspaceManager:
             self._save(path, metadata)
             return {"project_id": project_id, "repository_path": str(repository), "base_commit": head}
 
+    def create(self, project_id: str) -> dict:
+        """Create a committed project at <workspace>/<project_id>, retryably."""
+        project_id = self._identifier(project_id)
+        if project_id in {"worktrees", "artifacts", "repositories"}:
+            raise WorkspaceError("Project identifier is reserved")
+        repository = self._safe(project_id)
+        with self._locked(project_id) as (metadata, path):
+            if metadata:
+                if self._registered(metadata) != repository:
+                    raise WorkspaceError("Project is already registered to another repository")
+            else:
+                repository.mkdir(parents=True, exist_ok=True)
+                if not (repository / ".git").exists():
+                    if any(repository.iterdir()):
+                        raise WorkspaceError("Project directory is not empty")
+                    self._git(repository, "init", "-b", "main")
+                root = self._git(repository, "rev-parse", "--show-toplevel").stdout.strip()
+                if Path(root).resolve() != repository:
+                    raise WorkspaceError("Project directory must be a repository root")
+                if self._git(repository, "rev-parse", "--verify", "HEAD^{commit}", check=False).returncode:
+                    self._git(repository, "-c", "user.name=Orchestrator", "-c",
+                              "user.email=orchestrator@localhost", "commit", "--allow-empty",
+                              "-m", "Initialize project")
+                head = self._git(repository, "rev-parse", "HEAD").stdout.strip()
+                metadata = {"project_id": project_id, "repository_path": str(repository),
+                            "initial_commit": head, "workers": {}, "integrated_commits": [], "captures": {}}
+                self._save(path, metadata)
+            return {"project_id": project_id, "repository_path": str(repository),
+                    "base_commit": metadata["initial_commit"]}
+
     @staticmethod
     def _clean(path: Path) -> bool:
         return not WorkspaceManager._git(path, "status", "--porcelain").stdout.strip()

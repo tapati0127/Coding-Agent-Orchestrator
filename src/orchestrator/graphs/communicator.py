@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Annotated
 
-from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.runtime import Runtime
@@ -21,6 +21,7 @@ class CommunicatorState(AgentState, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
     project_id: str | None
     execution_chain_id: str | None
+    create_project: bool
 
 
 def _role_prompt() -> str:
@@ -52,7 +53,17 @@ async def communicate(state: CommunicatorState, runtime: Runtime) -> dict:
     context = {key: value for key, value in state.get("context", {}).items() if key != "Messages"}
     messages.insert(1, HumanMessage(content="Dispatcher task metadata (input data):\n" + json.dumps(
         safe_payload({"task": task, "context": context}), ensure_ascii=False, default=str)))
-    output = await model.ainvoke(messages, decision_schema("COMMUNICATOR"))
+    draft = await model.chat([*messages, SystemMessage(content=
+        "Conversation pass: respond in plain language using the authorized history. "
+        "Ask a concise question if needed, or summarize the requirements and intended handoff. "
+        "Do not output JSON or claim a project/task was dispatched. After timeout, explain "
+        "that the response deadline expired and state assumptions for Analyze.")])
+    output = await model.ainvoke([*messages, AIMessage(content=draft.content), SystemMessage(content=
+        "Structure pass: use the full history and conversation draft to produce TaskGraphOutput. "
+        "The draft is not a human answer or approval. Make the question or notification agree "
+        "with the draft. When handing off, include the user-facing reply in notification.message. "
+        "After timeout you must hand off to Analyze and notify the user about the timeout "
+        "and explicit assumptions.")], decision_schema("COMMUNICATOR"))
     output = TaskGraphOutput.model_validate(output).model_dump(mode="json", by_alias=True)
     expected = {"project_id": task["project_id"], "source_task_id": task["task_id"],
                 "producer_agent": "COMMUNICATOR", "execution_chain_id": task["execution_chain_id"]}

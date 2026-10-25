@@ -6,11 +6,11 @@ import logging
 import multiprocessing as mp
 from queue import Empty, Queue
 import time
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from orchestrator.dispatcher.engine import Dispatcher
 from orchestrator.dispatcher.process import DispatcherLoop
@@ -148,6 +148,8 @@ async def test_user_request_through_communicator_and_technical_worker_without_st
             {"id": "next", "target_agent": target, "title": "Process requirements brief"}])
 
     monkeypatch.setattr(QwenRunner, "_invoke", work)
+    conversation = AsyncMock(return_value=AIMessage(content="Requirements understood"))
+    monkeypatch.setattr(DecisionRunner, "chat", conversation)
     monkeypatch.setattr(DecisionRunner, "ainvoke", decide)
     monkeypatch.setattr("langgraph_sdk.get_client", Mock(side_effect=AssertionError("Agents must not open SDK clients")))
     await loop.handle({"request_id": uuid4().hex, "project_id": "p1", "agent": "COMMUNICATOR",
@@ -164,6 +166,7 @@ async def test_user_request_through_communicator_and_technical_worker_without_st
                 break
         await loop.schedule()
     assert model_roles == ["COMMUNICATOR", "ANALYZE"]
+    conversation.assert_awaited_once()
     assert work_roles == ["ANALYZE"]
     assert jobs["plan"].get_nowait()["task"]["agent"] == "PLAN_DELEGATE"
     assert sum(task.status == Status.DONE for task in (await engine.tasks("p1")).values()) == 2

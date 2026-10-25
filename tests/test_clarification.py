@@ -126,6 +126,10 @@ async def test_timeout_is_idempotent_and_does_not_invent_human_approval():
     await chat.dispatcher.recover("chat")
     updated = await chat.store.get(("coding", "chat", "approvals"), approval["approval_id"])
     assert updated["status"] == "TIMED_OUT" and updated["answer"] == ""
+    notifications = await chat.store.search(("coding", "chat", "notifications"))
+    assert len(notifications) == 1
+    assert notifications[0]["execution_chain_id"] == task["execution_chain_id"]
+    assert "hết thời gian" in notifications[0]["message"] and "Analyze" in notifications[0]["message"]
     assert len(await chat.dispatcher.tasks("chat")) == 2
     assert not (await chat.send("approval", {"approval_id": approval["approval_id"], "decision": "approve", "answer": "Late reply"}))["accepted"]
     resumed = await chat.claim()
@@ -134,6 +138,7 @@ async def test_timeout_is_idempotent_and_does_not_invent_human_approval():
     history = await chat.history(task["execution_chain_id"])
     assert history[-1].type == "system" and "no human approval" in history[-1].content
     assert not (await chat.result(resumed, human_request={"question": "Ask again?"}))["accepted"]
+    assert not (await chat.result(resumed, nodes=[{"id": "analyze", "target_agent": "ANALYZE", "title": "Analyze"}]))["accepted"]
     assert (await chat.result(resumed, nodes=[{"id": "analyze", "target_agent": "ANALYZE", "title": "Analyze with assumptions"}], notification={"message": "No reply yet; I assume the audience is customers."}))["accepted"]
 
 

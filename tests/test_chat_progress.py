@@ -56,7 +56,7 @@ async def test_only_changes_invoke_model_and_final_status_ends_stream(monkeypatc
 async def test_pending_question_is_streamed_and_releases_chat_run(monkeypatch):
     pending = {"approval_id": "a1", "status": "PENDING", "question": "Who uses it?"}
     result, runtime, _, events, _ = await follow(monkeypatch, [snapshot("DONE", approvals=[pending])])
-    assert events[1]["status"] == "waiting_for_user"
+    assert next(e for e in events if e.get("status") == "waiting_for_user")
     assert "Who uses it?" in runtime.chat.call_args.args[0][-1].content
     assert result["execution_chain_id"]
 
@@ -83,7 +83,41 @@ async def test_progress_is_chain_scoped_and_excludes_private_fields():
         await store.aput(("coding", "p", "tasks"), tid, {"task_id": tid,
             "execution_chain_id": chain, "title": tid, "status": "DOING", "private_prompt": "secret"})
     result = await progress.read_progress(store, "p", "a")
-    assert result == {"tasks": [{"task_id": "t1", "title": "t1", "status": "DOING"}], "approvals": []}
+    assert result == {"tasks": [{"task_id": "t1", "title": "t1", "status": "DOING"}], "approvals": [], "notifications": []}
+
+
+async def test_reopened_project_resumes_question_without_previous_thread(monkeypatch):
+    pending = {"approval_id": "a1", "status": "PENDING", "execution_chain_id": "saved-chain",
+               "producer_agent": "COMMUNICATOR"}
+    result, _, dispatcher, _, _ = await follow(monkeypatch, [
+        snapshot("DONE", approvals=[pending]), snapshot("CLOSED")], approval=pending)
+    assert result == {"execution_chain_id": "saved-chain"}
+    assert dispatcher.submit.call_args.args == ("p", "human_reply", {"approval_id": "a1", "answer": "Build API"})
+
+
+async def test_first_message_registers_project_before_submitting_work_and_retry_is_safe(monkeypatch, tmp_path):
+    from orchestrator.dispatcher.engine import Dispatcher
+    from orchestrator.store import StoreRecords
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path / "data"))
+    store = InMemoryStore()
+    engine = Dispatcher(StoreRecords(store))
+    async def submit(pid, kind, payload, *, request_id):
+        return await engine.handle({"project_id": pid, "kind": kind, "payload": payload,
+                                   "agent": "COMMUNICATOR", "request_id": request_id})
+    dispatcher = SimpleNamespace(submit=AsyncMock(side_effect=submit))
+    monkeypatch.setattr(progress, "get_dispatcher", lambda: dispatcher)
+    monkeypatch.setattr(progress, "read_progress", AsyncMock(return_value=snapshot("CLOSED")))
+    model = SimpleNamespace(chat=AsyncMock(return_value=AIMessage(content="Done")))
+    state = {"project_id": "automatic", "create_project": True,
+             "messages": [HumanMessage(content="Build a portal", id="user-first")]}
+    for _ in range(2):
+        await progress.follow_progress(state, model, state["messages"], lambda _: None, store=store)
+    project = (await store.aget(("coding", "projects"), "automatic")).value
+    assert project["repository_path"] == str(tmp_path / "workspace" / "automatic")
+    assert [call.args[1] for call in dispatcher.submit.call_args_list] == ["register_project", "human_message"]
+    assert len(await engine.tasks("automatic")) == 1
 
 
 async def test_retry_observes_original_chain_without_resubmitting_work(monkeypatch):

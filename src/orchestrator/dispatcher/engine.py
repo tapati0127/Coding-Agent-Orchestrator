@@ -16,6 +16,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, mess
 
 from orchestrator.schemas.task import Task
 from orchestrator.schemas.task_graph import Agent, HumanRequest, Outcome, Status, TaskGraphOutput
+from orchestrator.runtime.worktree import WorkspaceManager, WorkspaceError
 from .dag_scheduler import ready_tasks, resolved_task
 from .transitions import transition
 from .validator import backward_request, validate_dag, validate_authoritative_dag
@@ -137,7 +138,17 @@ class Dispatcher:
             if await self.store.get(("coding", "projects"), pid):
                 raise ValueError("project already exists")
             path = payload.get("repository_path")
-            if path:
+            if payload.get("create_workspace"):
+                if path:
+                    raise ValueError("Automatic projects cannot supply a repository path")
+                manager = WorkspaceManager(os.getenv("WORKSPACE_ROOT", "/workspace"),
+                                           os.getenv("DATA_ROOT", "/data"))
+                try:
+                    workspace = await asyncio.to_thread(manager.create, pid)
+                except WorkspaceError as exc:
+                    raise ValueError(str(exc)) from exc
+                path = workspace["repository_path"]
+            elif path:
                 path = await asyncio.to_thread(_repository_path, path)
             put(("coding", "projects"), pid, {"project_id": pid,
                 "title": str(payload.get("title", pid))[:500], "repository_path": path,
@@ -193,6 +204,10 @@ class Dispatcher:
                 if timed_out:
                     message = SystemMessage(content="The human response deadline expired. Continue to Analyze "
                         "with explicit assumptions; no human approval was given.", id=rid)
+                    put((*ns, "notifications"), identifier(rid, "timeout-notification"), {
+                        "message": "Đã hết thời gian chờ phản hồi. Communicator sẽ chuyển yêu cầu sang Analyze "
+                                   "với các giả định được nêu rõ.",
+                        "execution_chain_id": chain_id, "timestamp": self.clock()})
                 else:
                     message = HumanMessage(content=answer or "Rejected.", id=rid)
                 await self._conversation(put, pid, chain_id, message, timed_out=timed_out)
@@ -454,7 +469,8 @@ class Dispatcher:
                 private_ns += (source.assigned_worker,)
             put((*private_ns, source.thread_id), update.key, {"key": update.key, "value": update.value})
         if graph.notification:
-            put((*ns, "notifications"), rid, {"message": graph.notification.message, "timestamp": self.clock()})
+            put((*ns, "notifications"), rid, {"message": graph.notification.message,
+                "execution_chain_id": graph.execution_chain_id, "timestamp": self.clock()})
         return {"task_ids": created, "human_intervention": bool(overflow),
                 "delegation_accepted": not bool(overflow)}
 

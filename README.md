@@ -18,7 +18,7 @@ docker compose logs -f
 
 Dashboard nằm ở đường dẫn `/dashboard` trên port 2024. Compose mặc định chỉ bind port ra loopback của máy Docker; đổi binding trong môi trường mạng nội bộ có kiểm soát nếu cần. Nhập **DASHBOARD_TOKEN** vào giao diện. Không cung cấp ORCHESTRATOR_TOKEN cho trình duyệt.
 
-Project phải trỏ tới một repository Git có commit bên trong `/workspace` của container. Đưa repository vào volume hoặc mount một thư mục Git có sẵn tại `/workspace/repositories/<project_id>`. Tạo project trên Dashboard bằng đường dẫn đó, rồi gửi yêu cầu. Execute workers tạo worktree riêng; Verify dùng worktree integration. Repository rỗng cần một commit ban đầu trước khi cấp worktree.
+Chọn **Dự án mới** rồi mô tả điều bạn muốn làm với Communicator, hoặc chọn một project cũ để tiếp tục. Khi gửi tin nhắn đầu tiên, hệ thống tự sinh project ID, tạo thư mục `WORKSPACE_ROOT/<project_id>` (mặc định `/workspace/<project_id>`) và khởi tạo Git cùng commit ban đầu. Không cần nhập ID, tên hay đường dẫn repository. Hội thoại và câu hỏi đang chờ được nạp lại khi mở project cũ. Execute workers tạo worktree riêng; Verify dùng worktree integration. API đăng ký repository có sẵn vẫn được giữ cho tích hợp.
 
 Sau khi dependencies/image/model đã được chuẩn bị, runtime không cần Internet công cộng; `QWEN_BASE_URL` và endpoint Decision (nếu cấu hình riêng) phải tiếp tục truy cập được. Image build vẫn cần các registry hệ điều hành, Python và npm. API key không được lưu vào image, prompt hay repository.
 
@@ -59,7 +59,7 @@ không cần `task`, `cwd` hoặc Qwen Code. Câu trả lời phát qua stream, 
 return `messages`. Client gửi lại lịch sử hiển thị với các message ID ổn định khi
 nhắn lượt tiếp theo. Dùng cùng thread để giữ execution chain của cuộc trao đổi.
 
-Dashboard chỉ có khung chat và phần chọn/tạo dự án. Route `/api/chat/stream` dùng
+Dashboard có khung chat, danh sách project cũ và nút **Dự án mới**, không có form tạo project thủ công. Route `/api/chat/stream` dùng
 LangGraph SDK gọi `runs.stream` với `stream_mode=["messages-tuple", "custom"]` và
 `stream_subgraphs=True`, rồi chuyển tiếp token và namespace subgraph tới browser.
 Browser chỉ giữ DASHBOARD_TOKEN trong bộ nhớ; runtime token nằm ở server.
@@ -75,6 +75,13 @@ thúc khi cả chain CLOSED, cần người dùng trả lời, hoặc không cò
 và trạng thái giữ nguyên qua nhiều lần đọc. Chat trả lời câu hỏi làm rõ tiếp tục
 cùng chain qua `human_reply` (câu hỏi chuyển `RESOLVED`, không tự đánh dấu phê
 duyệt). Dừng theo dõi hoặc đóng browser không hủy task nền.
+
+Communicator worker chạy hai lượt model: tạo câu trả lời hội thoại, rồi tạo
+`TaskGraphOutput` từ lịch sử và bản trả lời đó. Khi đủ rõ, Dispatcher kiểm tra và
+tạo task Analyze; nếu cần hỏi thêm, worker được nhả để chờ người dùng. Khi hết
+thời gian chờ, hệ thống vẫn tiếp tục sang Analyze và lưu thông báo timeout cùng
+các giả định. Dashboard theo dõi notification riêng cả sau khi lượt chat đã kết
+thúc chờ trả lời; mở lại project cũng đọc được các thông báo đã lưu.
 
 Supervisor tạo một queue kết quả chung và một queue nhận việc cho mỗi worker
 bằng `multiprocessing.Queue`, rồi khởi động các worker bằng

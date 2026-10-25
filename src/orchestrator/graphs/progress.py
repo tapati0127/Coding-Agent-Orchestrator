@@ -28,9 +28,10 @@ async def _chain_values(store: BaseStore, namespace, chain_id):
 
 async def read_progress(store: BaseStore, project_id, chain_id):
     ns = ("coding", project_id)
-    tasks, approvals = await asyncio.gather(
+    tasks, approvals, notifications = await asyncio.gather(
         _chain_values(store, (*ns, "tasks"), chain_id),
-        _chain_values(store, (*ns, "approvals"), chain_id))
+        _chain_values(store, (*ns, "approvals"), chain_id),
+        _chain_values(store, (*ns, "notifications"), chain_id))
     return {
         "tasks": sorted([
             {key: row[key] for key in TASK_FIELDS if key in row}
@@ -40,7 +41,22 @@ async def read_progress(store: BaseStore, project_id, chain_id):
             {key: row[key] for key in ("approval_id", "question", "status") if key in row}
             for row in approvals if row.get("execution_chain_id") == chain_id
         ], key=lambda row: row["approval_id"]),
+        "notifications": [{"message": row["message"], "timestamp": row.get("timestamp")}
+                          for row in sorted(notifications, key=lambda row: row.get("timestamp", 0))],
     }
+
+
+async def _wait_receipt(store, pid, request_id, interval):
+    deadline = time.monotonic() + 30
+    while True:
+        item = await store.aget(("coding", pid, "responses", "COMMUNICATOR"), request_id)
+        if item:
+            if not item.value["accepted"]:
+                raise ValueError(item.value.get("reason", "Dispatcher rejected the request"))
+            return item.value
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Dispatcher did not accept the chat request within 30 seconds")
+        await asyncio.sleep(interval)
 
 
 async def follow_progress(state, model, messages, writer, *, store: BaseStore | None):
@@ -48,15 +64,28 @@ async def follow_progress(state, model, messages, writer, *, store: BaseStore | 
     pid = state["project_id"]
     if store is None:
         raise RuntimeError("Communicator progress requires a LangGraph runtime store")
-    if not await store.aget(("coding", "projects"), pid):
-        raise ValueError("Project not found")
     dispatcher = await asyncio.to_thread(get_dispatcher)
     latest = next(message for message in reversed(state["messages"]) if isinstance(message, HumanMessage))
+    interval = float(os.getenv("DISPATCH_POLL_SECONDS", "2"))
+    if not await store.aget(("coding", "projects"), pid):
+        if not state.get("create_project"):
+            raise ValueError("Project not found")
+        registration_id = identifier(pid, "register")
+        await dispatcher.submit(pid, "register_project", {
+            "title": latest.content[:80], "create_workspace": True}, request_id=registration_id)
+        await _wait_receipt(store, pid, registration_id, interval)
+    writer({"type": "project", "project_id": pid})
     # Stable across graph retries: retrying this node must not duplicate tasks.
     request_id = identifier(latest.id, "chat")
     previous_chain = state.get("execution_chain_id")
     existing_item = await store.aget(("coding", pid, "responses", "COMMUNICATOR"), request_id)
     existing = existing_item.value if existing_item else None
+    if not previous_chain and not existing:
+        # Reopening a project must answer its outstanding question even on a new
+        # browser/device with no LangGraph thread state.
+        questions = await store.asearch(("coding", pid, "approvals"), filter={"status": "PENDING"}, limit=10000)
+        if questions:
+            previous_chain = max(questions, key=lambda item: item.value.get("created_at", 0)).value["execution_chain_id"]
     pending = []
     if previous_chain and not existing:
         previous = await read_progress(store, pid, previous_chain)
@@ -82,18 +111,7 @@ async def follow_progress(state, model, messages, writer, *, store: BaseStore | 
     if not existing:
         await dispatcher.submit(pid, kind, payload, request_id=request_id)
     writer({"type": "status", "status": "submitted", "execution_chain_id": chain_id})
-    interval = float(os.getenv("DISPATCH_POLL_SECONDS", "2"))
-    deadline = time.monotonic() + 30
-    while True:
-        receipt_item = await store.aget(("coding", pid, "responses", "COMMUNICATOR"), request_id)
-        if receipt_item:
-            receipt = receipt_item.value
-            if not receipt["accepted"]:
-                raise ValueError(receipt.get("reason", "Dispatcher rejected the request"))
-            break
-        if time.monotonic() >= deadline:
-            raise TimeoutError("Dispatcher did not accept the chat request within 30 seconds")
-        await asyncio.sleep(interval)
+    await _wait_receipt(store, pid, request_id, interval)
 
     last = None
     idle_polls = 0
