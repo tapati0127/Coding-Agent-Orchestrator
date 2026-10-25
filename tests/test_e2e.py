@@ -100,9 +100,9 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             pytest.skip("Local port 2024 is already in use; no existing service was stopped")
     run_root = tmp_path / "server"
     run_root.mkdir()
-    for name in ("src", "prompts", "dashboard"):
+    for name in ("src", "prompts"):
         (run_root / name).symlink_to(ROOT / name, target_is_directory=True)
-    for name in ("langgraph.json", "pyproject.toml"):
+    for name in ("langgraph.json", "pyproject.toml", "graph.py"):
         shutil.copy2(ROOT / name, run_root / name)
     fixture = run_root / "qwen-fixture"
     shutil.copy2(ROOT / "tests" / "fixtures" / "qwen_fixture.py", fixture)
@@ -110,13 +110,14 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
     workspace, data = tmp_path / "workspace", tmp_path / "data"
     message_id = str(uuid4())
     pid = identifier(message_id, "project")
-    internal_token, dashboard_token = uuid4().hex, uuid4().hex
+    internal_token = uuid4().hex
     environment = {
         **os.environ,
         **decision_env,
         "PATH": f"{Path(sys.executable).parent}:{os.environ.get('PATH', '')}",
         "LANGGRAPH_URL": URL, "ORCHESTRATOR_TOKEN": internal_token,
-        "DASHBOARD_TOKEN": dashboard_token, "QWEN_CODE_BIN": str(fixture),
+        "PYTHONPATH": str(ROOT / "src"),
+        "QWEN_CODE_BIN": str(fixture),
         "QWEN_BASE_URL": "http://fixture.invalid/v1", "QWEN_API_KEY": "nonsecret-fixture-key",
         "QWEN_MODEL": "fixture-model", "WORKSPACE_ROOT": str(workspace), "DATA_ROOT": str(data),
         "DISPATCH_POLL_SECONDS": "0.05", "MAX_EXECUTE_WORKERS": "2", "MAX_QWEN_SESSIONS": "5",
@@ -125,17 +126,24 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
         "DO_NOT_TRACK": "1", "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost",
     }
     with httpx.Client(base_url=URL, timeout=10, trust_env=False) as client:
-        headers = {"Authorization": f"Bearer {dashboard_token}"}
         trusted = {"x-api-key": internal_token}
         first_log = tmp_path / "first-start.log"
         with supervisor(run_root, environment, first_log) as process:
             wait_for(lambda: client.get("/ok", headers=trusted).status_code == 200,
                      description="Agent Server readiness", process=process, logfile=first_log)
-            assert client.get("/dashboard").status_code == 200
-            assert client.get("/api/projects").status_code == 401
-            assert client.post("/store/items/search", headers=headers,
+            assert client.get("/dashboard", headers=trusted).status_code == 404
+            assert client.get("/api/projects", headers=trusted).status_code == 404
+            assert client.post("/store/items/search",
                                json={"namespace_prefix": ["coding"], "limit": 10}).status_code in {401, 403}
             sdk = get_sync_client(url=URL, api_key=internal_token)
+
+            def read_snapshot():
+                result = {section: [row["value"] for row in sdk.store.search_items(
+                    ("coding", pid, section), limit=100)["items"]]
+                    for section in ("tasks", "workers", "notifications")}
+                result["project"] = sdk.store.get_item(("coding", "projects"), key=pid)["value"]
+                return result
+
             thread = sdk.threads.create()
             selected = sdk.runs.wait(thread["thread_id"], "communicator", input={"messages": [
                 {"id": message_id, "role": "user", "content": "tạo project mới"}]})
@@ -151,9 +159,7 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             assert any('"type": "reply"' in line for line in frames), frames
 
             def completed():
-                response = client.get(f"/api/projects/{pid}/snapshot", headers=headers)
-                response.raise_for_status()
-                snapshot = response.json()
+                snapshot = read_snapshot()
                 tasks = snapshot["tasks"]
                 failed_workers = [worker for worker in snapshot["workers"] if worker.get("status") == "FAILED"]
                 assert not failed_workers, f"Worker failed: {failed_workers}\n{first_log.read_text()[-16000:]}"
@@ -204,7 +210,7 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
         with supervisor(run_root, environment, restart_log) as restarted:
             wait_for(lambda: client.get("/ok", headers=trusted).status_code == 200,
                      description="restarted Agent Server", process=restarted, logfile=restart_log)
-            restored = wait_for(lambda: client.get(f"/api/projects/{pid}/snapshot", headers=headers).json(),
+            restored = wait_for(read_snapshot,
                                 description="restored Store snapshot", process=restarted, logfile=restart_log)
             assert {task["task_id"] for task in restored["tasks"]} == task_ids
             assert all(task["status"] == "CLOSED" for task in restored["tasks"])

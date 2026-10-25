@@ -28,15 +28,14 @@ ENV UV_LINK_MODE=copy UV_COMPILE_BYTECODE=1 UV_SYSTEM_CERTS=true PYTHONUNBUFFERE
 COPY pyproject.toml uv.lock ./
 COPY src ./src
 COPY prompts ./prompts
-COPY dashboard ./dashboard
 COPY config ./config
 COPY skills ./skills
 RUN uv sync --frozen --no-dev
-COPY langgraph.json ./
+COPY langgraph.json graph.py ./
 RUN mkdir -p /workspace /data
 VOLUME ["/workspace", "/data"]
 EXPOSE 2024
 HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=5 \
     CMD python -c "import os,urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:2024/ok', headers={'x-api-key':os.environ.get('ORCHESTRATOR_TOKEN','')}), timeout=3)"
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["python", "-m", "orchestrator.supervisor"]
+CMD ["python", "graph.py"]

@@ -1,8 +1,4 @@
-"""Trusted runtime authentication for built-in Agent Server APIs.
-
-Dashboard credentials are deliberately not accepted here. Dashboard endpoints
-have their own authentication and only enqueue requests, never mutate tasks.
-"""
+"""Trusted runtime authentication for built-in Agent Server APIs."""
 from __future__ import annotations
 
 import hmac
@@ -32,9 +28,6 @@ async def authenticate(
     # Misconfiguration must not silently expose the Store or run endpoints.
     if not expected:
         raise Auth.exceptions.HTTPException(status_code=503, detail="Runtime authentication is not configured")
-    dashboard = os.environ.get("DASHBOARD_TOKEN", "")
-    if dashboard and hmac.compare_digest(expected, dashboard):
-        raise Auth.exceptions.HTTPException(status_code=503, detail="Runtime and dashboard tokens must differ")
     candidate = _header(headers, "x-api-key")
     bearer = authorization or _header(headers, "authorization")
     if not candidate and bearer.lower().startswith("bearer "):

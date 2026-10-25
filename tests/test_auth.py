@@ -4,13 +4,12 @@ from orchestrator.auth import authenticate
 from orchestrator.config import Settings
 
 
-async def test_runtime_key_auth_and_dashboard_denied(monkeypatch):
+async def test_runtime_key_auth_and_invalid_credentials_denied(monkeypatch):
     monkeypatch.setenv("ORCHESTRATOR_TOKEN", "runtime-secret")
-    monkeypatch.setenv("DASHBOARD_TOKEN", "dashboard-secret")
     assert (await authenticate({b"x-api-key": b"runtime-secret"}))["identity"] == "orchestrator-runtime"
     assert (await authenticate(authorization="Bearer runtime-secret"))["permissions"] == ["runtime"]
     with pytest.raises(Auth.exceptions.HTTPException) as error:
-        await authenticate(authorization="Bearer dashboard-secret")
+        await authenticate(authorization="Bearer invalid-secret")
     assert error.value.status_code == 401
 
 
@@ -18,14 +17,6 @@ async def test_unconfigured_auth_fails_closed(monkeypatch):
     monkeypatch.delenv("ORCHESTRATOR_TOKEN", raising=False)
     with pytest.raises(Auth.exceptions.HTTPException) as error:
         await authenticate()
-    assert error.value.status_code == 503
-
-
-async def test_shared_tokens_fails_closed(monkeypatch):
-    monkeypatch.setenv("ORCHESTRATOR_TOKEN", "same")
-    monkeypatch.setenv("DASHBOARD_TOKEN", "same")
-    with pytest.raises(Auth.exceptions.HTTPException) as error:
-        await authenticate(authorization="Bearer same")
     assert error.value.status_code == 503
 
 

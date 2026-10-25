@@ -2,52 +2,58 @@
 
 ## Process và dữ liệu
 
-Supervisor tạo `multiprocessing.Queue` và khởi động các worker bằng
-`multiprocessing.Process` với start method spawn. Mỗi worker có queue nhận việc
-riêng; mọi worker gửi heartbeat, kết quả và lỗi vào một queue chung. Dispatcher
-là một async task trong lifespan của Agent Server, dùng `runtime.store` của
-LangGraph, không còn process Dispatcher hoặc SDK Store client riêng.
+Entry point là `graph.py` ở root. `langgraph.json` expose `./graph.py:graph`,
+chính là graph Communicator nhận message human. `python graph.py` chuẩn bị
+persistence rồi gọi CLI Python để chạy Agent Server ngay trong process hiện tại. Lifecycle trong
+`orchestrator.server` lấy Runtime và gọi `graph_lifespan` của `graph.py`.
 
-Dispatcher là bên duy nhất ghi Store. Nó đọc task, kiểm tra
-DAG/dependencies và concurrency, claim độc quyền rồi dựng snapshot `task`,
-`project`, `context`, `predecessors`, `thread_id` cho worker. Worker chờ
-`queue.get()` và invoke graph local, không dùng Store/SDK hay polling receipt.
-Communicator gọi ChatOpenAI trực tiếp; năm role kỹ thuật dùng Work qua Qwen Code
-và Decision qua ChatOpenAI. Graph kết thúc sau một lượt, worker quay lại chờ.
+`GraphRuntime` khai báo toàn bộ queue bằng `multiprocessing` của Python với start
+method `spawn`: `dispatcher_queue`, `agent_queues`, `store_requests`, `store_responses`.
+Import module không tạo queue/process. Communicator xử lý task bằng vòng `agent_loop`
+trong process chính cùng endpoint SDK. Analyze, Plan & Delegate, Execute,
+Verify & Integrate và Finalize dùng cùng vòng `while True` ở process riêng.
+Dispatcher có StateGraph riêng; node dispatch chạy `DispatcherLoop.run`, đọc
+queue liên tục, xử lý event rồi kiểm tra task sẵn sàng để giao.
 
-`langgraph.json` chỉ expose graph Communicator (`START → communicate → END`).
-Agent Server phục vụ chat và Dashboard. Custom lifespan lấy Runtime bằng
-`get_runtime()` sau khi runtime nền khởi tạo Store và truyền cho Dispatcher.
-Một manager bridge loopback cấp proxy của inbox/event queue cho Dispatcher;
-bridge không truy cập Store. Worker giữ queue trực tiếp và invoke graph local;
-việc chạy graph kỹ thuật không đi qua Agent Server.
+```text
+Main process: Human → Communicator → dispatcher_queue
+                                    ↓
+Dispatcher process: validate → claim → agent_queues[worker_id]
+                                    ↓
+Technical processes: graph run → heartbeat/result/failure → dispatcher_queue
+```
+
+Dispatcher là bên duy nhất quyết định ghi Store: kiểm tra DAG/dependencies,
+owner/attempt, lease, giới hạn concurrency và kết quả rồi ghi journal/receipt.
+Worker nhận snapshot `task`, `project`, `context`, `predecessors`, `thread_id`;
+không mở SDK hay poll Store. Communicator gọi ChatOpenAI trực tiếp; năm role
+kỹ thuật chạy Work qua Qwen Code và Decision qua ChatOpenAI.
+
+Native Store do Runtime inject ở main process không được pickle hoặc tạo bản sao
+trong process Dispatcher. `QueueStoreRecords` gửi RPC qua queue tới `serve_store`
+ở main process; service gọi `StoreRecords` để thao tác trên đúng native Store.
+RPC chỉ hỗ trợ get/put/delete/search, tuần tự trong Dispatcher, kiểm tra request ID
+và có timeout. Exception trả về loại lỗi thay vì nội dung có thể chứa dữ liệu riêng.
+Communicator đọc cùng Store qua `runtime.store.aget/asearch` để theo dõi chain.
+Không có Manager bridge hoặc HTTP Store client trong runtime này.
 
 Giới hạn Qwen toàn hệ thống nằm ở Dispatcher; Communicator không chiếm slot.
-Semaphore trong QwenRunner chỉ có phạm vi một worker process. Task và journal
-vẫn lưu trong Store; queue không lưu bền. Dispatcher phục hồi task sau lease hết
-hạn hoặc restart. Mọi heartbeat/result/failure từ worker có task_attempt; kết quả
-của lượt đã hết hạn bị từ chối ngay cả khi worker ID được dùng lại.
+Semaphore trong QwenRunner có phạm vi một process. Queue không lưu bền; task,
+journal và lease vẫn được phục hồi từ Store. Kết quả attempt cũ bị từ chối.
+File lock giữ đúng một Dispatcher cho cùng data directory.
 
-Shutdown gửi sentinel cho workers, đợi kết quả flush về Dispatcher, rồi dừng
-Dispatcher, Agent Server và manager bridge. Worker process chết được restart có
-giới hạn. Dispatcher lỗi thì Supervisor dừng các worker và server; lỗi khởi động
-Dispatcher làm Agent Server không ready. Task vẫn được bảo vệ bằng owner, lease
-và attempt. File lock giữ đúng một Dispatcher cho cùng data directory.
+Shutdown gửi sentinel cho agent, đợi kết quả flush, dừng Dispatcher rồi mới dừng
+Store service. Worker chết được restart theo budget; Dispatcher/Store service/
+vòng Communicator chết làm server dừng. Khởi động Dispatcher lỗi làm server không
+ready. Các thao tác process/queue và filesystem chạy ngoài event loop khi cần.
 
-Communicator chat nhận `Runtime` của LangGraph và đọc task/approval theo execution
-chain bằng `runtime.store.aget/asearch`. Store được Agent Server inject, hoặc được
-truyền qua `builder.compile(store=store)` khi chạy local; subgraph kế thừa Store
-của graph cha. Không tạo SDK client hoặc Store riêng trong node. Dispatcher cũng
-nhận `runtime.store`; `StoreRecords` chỉ unwrap native Store Items cho engine,
-không mở kết nối HTTP hoặc tạo backend riêng.
-Communicator chỉ gọi ChatOpenAI.ainvoke khi snapshot trạng thái đổi, stream
-token mà không return messages. Theo dõi dừng khi chain CLOSED, chờ human hoặc
-không còn task active sau nhiều lần đọc ổn định. Worker kỹ thuật vẫn không đọc
-Store. Hủy task/CANCEL chưa triển khai; khi thêm phải gửi yêu cầu qua Dispatcher.
+Communicator chỉ gọi model báo tiến độ khi snapshot đổi. Lượt theo dõi kết thúc
+khi chain CLOSED, chờ human hoặc không còn task active sau nhiều lần đọc ổn định.
+Hủy stream không hủy task; CANCEL chưa triển khai.
 
 Communicator dùng `backward_count` chung khi tự giao hoặc hỏi human, không có bộ đếm hỏi riêng. Approval của Communicator có deadline (mặc định 1800 giây). Trả lời hoặc timeout tạo task Communicator trong cùng chain qua journal/receipt hiện có; timeout ghi SystemMessage, không giả tạo HumanMessage hay phê duyệt. Khi timeout hoặc hết ngân sách, Communicator bàn giao Analyze với giả định công khai. Từ chối không tiếp tục. Task hỏi đã DONE/SUCCESS vì lượt giao tiếp hoàn tất; không giữ lease khi chờ human.
 
-`CommunicatorState.messages` là danh sách `AnyMessage` dùng reducer `add_messages`. Lịch sử được journal theo chain ở `("coding", project_id, "conversations")`, không nằm trong shared context/task description. Dispatcher dùng scoped adapter để cấp lịch sử cho Communicator, Analyze, Finalize. Finalize dùng nó đối chiếu nghiệm thu với mong muốn người dùng; các role còn lại chỉ nhận brief/contract. Dashboard có projection riêng của tin nhắn human/ai.
+`CommunicatorState.messages` là danh sách `AnyMessage` dùng reducer `add_messages`. Lịch sử được journal theo chain ở `("coding", project_id, "conversations")`, không nằm trong shared context/task description. Dispatcher dùng scoped adapter để cấp lịch sử cho Communicator, Analyze, Finalize. Finalize dùng nó đối chiếu nghiệm thu với mong muốn người dùng; các role còn lại chỉ nhận brief/contract. SDK đọc câu trả lời từ thread state hoặc stream.
 
 ## HTTP và quyền
 
@@ -62,17 +68,17 @@ Cả hai pass ghi log private đã che credentials; Decision chỉ phát sự ki
 không stream token. Timeout và lỗi LLM đi qua cơ chế retry kỹ thuật hiện có.
 Skill không thay thế quyền công cụ, sandbox hoặc quyền token GitLab.
 
-Agent Server phục vụ cả `/dashboard` và API giao diện `/api/*`. Dashboard là khung
-chat, không còn bảng DAG/workers/artifacts. `/api/chat/stream` dùng LangGraph SDK
-gọi graph communicator với stream_subgraphs=True và modes messages-tuple/custom; root
-graph chứa subgraph communicate để token mang namespace nguồn. API proxy nhận
-messages/project/thread đã kiểm tra, không nhận task/context tùy ý. Khi resume,
-thread phải có metadata dashboard_chat và khớp project. Built-in Store/thread/run
-API dùng ORCHESTRATOR_TOKEN; browser chỉ dùng DASHBOARD_TOKEN khác qua proxy.
-Không có endpoint giao diện nào cho browser ghi task/plan authoritative. Đóng
-stream hủy lượt theo dõi qua on_disconnect=cancel; task nền vẫn do Dispatcher quản lý.
+Client dùng LangGraph SDK gọi graph communicator với `stream_subgraphs=True` và
+modes `messages-tuple/custom`; root graph chứa subgraph communicate để token mang
+namespace nguồn. Built-in Store/thread/run API dùng `ORCHESTRATOR_TOKEN`. Đây là
+token runtime có quyền quản trị; chỉ cấp cho client được tin cậy. Client gửi tin
+nhắn mới trên cùng thread để tiếp tục lịch sử. Đóng stream với `on_disconnect=cancel`
+dừng lượt theo dõi; task nền vẫn do Dispatcher quản lý.
 
-Không bật custom-route auth mặc định của Agent Server cho `/api/*`, vì các route này kiểm tra dashboard token riêng. CORS mặc định cùng origin. Không đưa token vào URL hoặc gửi private scratchpad/raw Qwen logs lên browser. Dashboard stream tiến độ công khai, không stream scratchpad hay raw subprocess output. Patch/report content chỉ hiển thị qua shared artifact references đã được Dispatcher chấp nhận và kiểm tra scope; file trên disk không tự động thành tài liệu public. Shared promotion là đề xuất phải được Dispatcher kiểm tra.
+Communicator stream tiến độ công khai, không stream scratchpad hay raw subprocess
+output. Patch/report chỉ được đưa vào context qua shared artifact references đã
+được Dispatcher chấp nhận và kiểm tra scope; file trên disk không tự động thành
+tài liệu public. Shared promotion là đề xuất phải được Dispatcher kiểm tra.
 
 Private namespace là phân vùng logic, không phải ACL. Dispatcher dùng ScopedContext dựng shared context và private đúng owner; không đưa SDK Store credentials vào Qwen environment. Một container không bảo vệ được dữ liệu khỏi code độc hại cùng quyền user.
 

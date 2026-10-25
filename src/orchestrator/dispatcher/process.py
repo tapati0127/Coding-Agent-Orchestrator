@@ -15,37 +15,12 @@ log = logging.getLogger(__name__)
 
 
 class DispatcherLoop:
-    def __init__(self, engine, events, inboxes, roles, replies, *, interval=2.):
+    def __init__(self, engine, events, inboxes, roles, *, interval=2.):
         self.engine, self.events = engine, events
-        self.inboxes, self.roles, self.replies = inboxes, roles, replies
+        self.inboxes, self.roles = inboxes, roles
         self.interval = interval
 
     async def handle(self, event):
-        if event.get("kind") == "dashboard_read":
-            if event["deadline"] <= time.time():
-                return
-            payload = event["payload"]
-            ns = tuple(payload["namespace"])
-            allowed = ns == ("coding", "projects") or (
-                len(ns) >= 3 and ns[0] == "coding" and ns[2:] in {
-                    ("tasks",), ("plans",), ("events",), ("approvals",), ("workers",),
-                    ("notifications",), ("conversations",), ("shared", "artifacts"),
-                })
-            try:
-                if not allowed:
-                    raise ValueError("Dashboard namespace is not allowed")
-                if payload["operation"] == "get":
-                    value = await self.engine.store.get(ns, payload["key"])
-                elif payload["operation"] == "search":
-                    value = await self.engine.store.search(ns, limit=min(payload.get("limit", 10000), 10000))
-                else:
-                    raise ValueError("Unknown dashboard read operation")
-                reply = {"accepted": True, "value": value}
-            except ValueError as exc:
-                reply = {"accepted": False, "reason": str(exc)}
-            if event["deadline"] > time.time():
-                await asyncio.to_thread(self.replies.__setitem__, event["request_id"], reply)
-            return
         receipt = await self.engine.handle(event)
         if event.get("kind") == "result" and not receipt["accepted"]:
             log.warning("Task result rejected: task=%s worker=%s", event.get("task_id"), event.get("worker_id"))
@@ -103,10 +78,7 @@ class DispatcherLoop:
                 return
             if event:
                 await self.handle(event)
-            schedule = event.get("kind") != "dashboard_read"
             if time.monotonic() - recovered_at >= self.interval:
                 await self.recover()
                 recovered_at = time.monotonic()
-                schedule = True
-            if schedule:
-                await self.schedule()
+            await self.schedule()

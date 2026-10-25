@@ -18,7 +18,6 @@ class Settings:
     decision_model: str = ""
     decision_timeout_seconds: int = 120
     orchestrator_token: str = field(default="", repr=False)
-    dashboard_token: str = field(default="", repr=False)
     max_execute_workers: int = 5
     max_qwen_sessions: int = 5
     max_backward_delegations: int = 3
@@ -41,8 +40,6 @@ class Settings:
                 or self.qwen_timeout_seconds <= 0 or self.human_response_timeout_seconds <= 0
                 or self.decision_timeout_seconds <= 0):
             raise ValueError("Polling, lease and timeout durations must be positive")
-        if self.orchestrator_token and self.orchestrator_token == self.dashboard_token:
-            raise ValueError("ORCHESTRATOR_TOKEN and DASHBOARD_TOKEN must be different")
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Settings":

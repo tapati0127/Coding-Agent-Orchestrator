@@ -1,8 +1,8 @@
 {
   "dependencies": ["."],
   "graphs": {
-    "communicator": "./src/orchestrator/graphs/communicator.py:graph"
+    "communicator": "./graph.py:graph"
   },
-  "http": {"app": "./src/orchestrator/web.py:app", "enable_custom_route_auth": false},
+  "http": {"app": "./src/orchestrator/server.py:app"},
   "auth": {"path": "./src/orchestrator/auth.py:auth"}
 }

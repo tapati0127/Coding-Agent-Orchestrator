@@ -1,6 +1,6 @@
 # Multi-Agent Qwen Code Orchestrator
 
-MVP điều phối sáu loại agent bằng LangGraph Agent Server và Qwen Code, chạy trong **một container**. Dispatcher là bên duy nhất cập nhật task chính thức; Dashboard được gắn vào cùng Agent Server, không có PostgreSQL, Redis hay backend điều phối riêng.
+MVP điều phối sáu loại agent bằng LangGraph Agent Server và Qwen Code, chạy trong **một container**. Dispatcher là bên duy nhất cập nhật task chính thức; người dùng chat qua LangGraph SDK, không có PostgreSQL, Redis hay backend điều phối riêng.
 
 Yêu cầu gốc: [docs/requirements.md](docs/requirements.md). Thiết kế và giới hạn: [docs/architecture.md](docs/architecture.md).
 
@@ -11,14 +11,13 @@ Cần Docker/Compose và một endpoint OpenAI-compatible mà container truy c�
 ```bash
 cp .env.example .env
 # Sửa QWEN_BASE_URL, QWEN_MODEL, QWEN_API_KEY và ORCHESTRATOR_TOKEN trong .env.
-# DASHBOARD_TOKEN chỉ cần nếu sử dụng dashboard; phải khác ORCHESTRATOR_TOKEN.
 docker compose up --build -d
 docker compose logs -f
 ```
 
-Chat trực tiếp với graph `communicator` qua LangGraph SDK, dùng **ORCHESTRATOR_TOKEN**. Agent Server nghe port 2024 bên trong container; dùng host/port được map trong `docker-compose.yml` khi kết nối từ máy host. `DASHBOARD_TOKEN` có thể để trống khi chỉ dùng SDK; các API dashboard khi đó bị khóa.
+Chat trực tiếp với graph `communicator` qua LangGraph SDK, dùng **ORCHESTRATOR_TOKEN**. Agent Server nghe port 2024 bên trong container; dùng host/port được map trong `docker-compose.yml` khi kết nối từ máy host.
 
-Ở đầu hội thoại, Communicator liệt kê các project để chọn bằng số thứ tự, tên hoặc ID. Nếu chưa có project, hoặc bạn nói **tạo project mới**, hệ thống tự sinh ID, tạo thư mục `WORKSPACE_ROOT/<project_id>` (mặc định `/workspace/<project_id>`) và khởi tạo Git cùng commit ban đầu. Lựa chọn được lưu vào `state.project_id` của thread. Execute workers tạo worktree riêng; Verify dùng worktree integration. API đăng ký repository có sẵn vẫn được giữ cho tích hợp.
+Ở đầu hội thoại, Communicator liệt kê các project để chọn bằng số thứ tự, tên hoặc ID. Nếu chưa có project, hoặc bạn nói **tạo project mới**, hệ thống tự sinh ID, tạo thư mục `WORKSPACE_ROOT/<project_id>` (mặc định `/workspace/<project_id>`) và khởi tạo Git cùng commit ban đầu. Lựa chọn được lưu vào `state.project_id` của thread. Execute workers tạo worktree riêng; Verify dùng worktree integration. Tích hợp nội bộ có thể đăng ký repository có sẵn bằng request `register_project` tới Dispatcher.
 
 Sau khi dependencies/image/model đã được chuẩn bị, runtime không cần Internet công cộng; `QWEN_BASE_URL` và endpoint Decision (nếu cấu hình riêng) phải tiếp tục truy cập được. Image build vẫn cần các registry hệ điều hành, Python và npm. API key không được lưu vào image, prompt hay repository.
 
@@ -34,10 +33,14 @@ cp .env.example .env
 set -a
 . ./.env
 set +a
-uv run python -m orchestrator.supervisor
+uv run python graph.py
 ```
 
-Supervisor khởi động `langgraph dev --host 0.0.0.0 --port 2024 --no-browser --no-reload --n-jobs-per-worker 10`. Dispatcher chạy trong lifespan của Agent Server với Store từ Runtime; sau readiness, Supervisor khởi động từng worker process. Dừng bằng SIGTERM/Ctrl-C để lưu trạng thái phát triển và kết thúc theo thứ tự.
+`graph.py` là entrypoint ngoài cùng. Launcher chuẩn bị persistence rồi gọi trực tiếp CLI Python chạy
+`langgraph dev --host 0.0.0.0 --port 2024 --no-browser --no-reload --n-jobs-per-worker 10`
+ở foreground. Communicator chạy trong process chính của Agent Server; lifecycle trong
+`graph.py` tạo queue và khởi động Dispatcher cùng các agent kỹ thuật ở process riêng.
+Dừng bằng SIGTERM/Ctrl-C để lưu trạng thái phát triển và kết thúc theo thứ tự.
 
 ```bash
 uv run pytest -q
@@ -98,47 +101,46 @@ thời gian chờ, hệ thống vẫn tiếp tục sang Analyze và lưu thông 
 các giả định. Khi lượt chat đã kết thúc chờ trả lời, có thể nhắn **tiến độ** để đọc
 cập nhật và các thông báo timeout/giả định đã lưu.
 
-Supervisor tạo một queue kết quả chung và một queue nhận việc cho mỗi worker
-bằng `multiprocessing.Queue`, rồi khởi động các worker bằng
-`multiprocessing.Process` (spawn). Dispatcher là một async task trong lifespan
-của Agent Server, nhận `Runtime` và dùng chung `runtime.store` với Communicator.
+Mọi queue được khai báo trong `GraphRuntime` ở [graph.py](graph.py), dùng
+`multiprocessing.get_context("spawn").Queue()` của thư viện chuẩn Python.
+Communicator đọc queue trong process chính; Analyze, Plan & Delegate, Execute,
+Verify & Integrate, Finalize và Dispatcher chạy trong các process con riêng.
+Mỗi role có một vòng `while True` đọc queue, chạy graph cho task nhận được rồi
+quay lại chờ. Execute có từ 1 đến 5 process theo `MAX_EXECUTE_WORKERS`.
 
 ```text
-Dispatcher đọc/ghi Store
-    → cấp task + context → queue của worker
-    → worker queue.get() → invoke graph local → queue kết quả chung
-    → Dispatcher kiểm tra, lưu kết quả và giao task tiếp theo
+Human message → Communicator (process chính)
+                   ↓ dispatcher_queue
+              Dispatcher graph (process con)
+                   ↓ agent_queues[worker_id]
+              Agent graph → dispatcher_queue → Dispatcher
 ```
 
-**Chỉ Dispatcher ghi Store; Communicator chat đọc `runtime.store` để báo tiến độ.**
-Dispatcher dựng context, kiểm tra dependencies,
-claim task và cấp lease trước khi giao việc. Worker không poll Store, không chờ
-receipt và không gọi LangGraph SDK. Worker chờ bằng `queue.get()`, log bắt đầu/kết
-thúc/lỗi, rồi chạy graph ngay trong process của mình. Mỗi graph run xử lý một task
-và kết thúc; vòng chờ tiếp tục cho tới khi nhận sentinel shutdown.
+Điểm bắt đầu là tin nhắn human vào graph `communicator` qua SDK. Sau khi chọn hoặc
+tạo project, Communicator gửi yêu cầu vào queue Dispatcher. Dispatcher kiểm tra
+DAG, dependencies, concurrency, claim và lease trước khi cấp snapshot cho agent.
+Communicator xử lý task hội thoại ngay trong process chính; năm role kỹ thuật
+chạy graph local trong process riêng, không gọi SDK hay đọc Store trực tiếp.
+
+**Dispatcher là nơi duy nhất quyết định ghi dữ liệu chính thức.** Native Store vẫn
+ở process Communicator do LangGraph Runtime cung cấp. Dispatcher dùng
+`QueueStoreRecords` gửi thao tác qua `store_requests`, nhận kết quả qua
+`store_responses`; `serve_store` trong process chính thực thi các thao tác đó.
+Không truyền Store object qua process, không dùng HTTP Store client hay Manager bridge.
+Communicator đọc `runtime.store` để báo tiến độ.
 
 Các queue chỉ nằm trong RAM. Sau restart, Dispatcher đọc task còn lưu trong Store,
-phục hồi lease hết hạn và giao lại việc còn hợp lệ. Mã lượt chạy (`task_attempt`)
-giúp từ chối heartbeat/kết quả cũ của lượt đã hết lease. Giới hạn Qwen toàn hệ thống
-được Dispatcher kiểm tra khi cấp việc; Communicator không chiếm slot Qwen.
-
-Agent Server chỉ expose Communicator và phục vụ Dashboard. Supervisor mở một
-`multiprocessing.Manager` bridge trên loopback để Dispatcher trong Agent Server
-nhận kết quả và gửi việc qua các queue worker. Dashboard gửi yêu cầu tới cùng
-Dispatcher qua bridge; không mở Store client.
-Chạy qua Supervisor để có bridge; graph chat `messages` vẫn dùng được riêng.
-
-Dispatcher và Communicator đều dùng Store từ Runtime, không gọi HTTP Store API.
-`StoreRecords` chỉ chuyển native Store Items thành dictionary cho engine hiện
-có, không tạo client hay Store mới. Khi shutdown, Supervisor đợi worker flush
-kết quả, gửi sentinel dừng Dispatcher rồi mới dừng Agent Server và bridge.
+phục hồi lease hết hạn và giao lại việc hợp lệ. `task_attempt` giúp từ chối kết quả
+cũ. Khi shutdown, lifecycle gửi sentinel dừng agent, chờ flush kết quả, dừng
+Dispatcher, rồi mới dừng dịch vụ queue Store và Agent Server. Worker chết được
+restart có giới hạn; Dispatcher chết làm runtime dừng để phục hồi bằng journal/lease.
 
 Chưa triển khai hủy task hoặc trạng thái `CANCEL`.
 
-Yêu cầu từ Dashboard tạo task Communicator thực sự. Agent này gọi LLM với
+Yêu cầu từ chat tạo task Communicator thực sự. Agent này gọi LLM với
 `prompts/communicator.md`, đứng về phía người dùng để làm rõ mục tiêu, phạm vi và
-kết quả mong muốn. Task Communicator chỉ gọi ChatOpenAI một lần với lịch sử
-`messages` và metadata của task để trả `TaskGraphOutput` cho Dispatcher.
+kết quả mong muốn. Task Communicator gọi ChatOpenAI hai lượt với lịch sử
+`messages` và metadata của task: bản nháp hội thoại rồi `TaskGraphOutput` cho Dispatcher.
 Communicator chọn giao cho chính nó, hỏi human bằng `human_request`/`HUMAN_APPROVAL`,
 hoặc bàn giao bản tóm tắt yêu cầu cho Analyze.
 
@@ -152,7 +154,7 @@ ngân sách; không coi im lặng là phê duyệt. Người dùng từ chối t
 State Communicator có `messages: Annotated[list[AnyMessage], add_messages]`.
 Dispatcher journal lịch sử theo chain ở namespace `conversations`; scoped context
 do Dispatcher dùng chỉ cấp lịch sử cho Communicator, Analyze và Finalize. Các agent còn lại nhận brief
-và shared contracts. Dashboard hiển thị hội thoại cho người dùng đã xác thực.
+và shared contracts. SDK trả lời và stream hội thoại trên thread đã xác thực.
 Đây là giới hạn cấp context, không phải sandbox filesystem giữa các process.
 
 Analyze chỉ được giao cho Communicator hoặc Plan & Delegate. JSON Schema của
@@ -234,8 +236,7 @@ quyền truy cập GitLab còn phụ thuộc token được cấp.
 
 | Biến | Ý nghĩa |
 | --- | --- |
-| `ORCHESTRATOR_TOKEN` | Token API nội bộ Agent Server và SDK chat proxy; không phát cho browser |
-| `DASHBOARD_TOKEN` | Token riêng cho API giao diện |
+| `ORCHESTRATOR_TOKEN` | Token API nội bộ Agent Server và SDK chat |
 | `QWEN_BASE_URL`, `QWEN_API_KEY`, `QWEN_MODEL` | Endpoint/model OpenAI-compatible cho Qwen Code |
 | `DECISION_BASE_URL`, `DECISION_API_KEY`, `DECISION_MODEL` | LLM nội bộ cho Decision; từng giá trị mặc định theo `QWEN_*` |
 | `DECISION_TIMEOUT_SECONDS` | Timeout Decision LLM; mặc định 120 giây |

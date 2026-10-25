@@ -532,7 +532,7 @@ class Dispatcher:
         text = json.dumps([u.model_dump() for u in graph.shared_updates + graph.private_updates])
         if len(text.encode()) > 65536:
             raise ValueError("large updates must use artifact references")
-        for name in ("QWEN_API_KEY", "DECISION_API_KEY", "ORCHESTRATOR_TOKEN", "DASHBOARD_TOKEN", "GITLAB_TOKEN"):
+        for name in ("QWEN_API_KEY", "DECISION_API_KEY", "ORCHESTRATOR_TOKEN", "GITLAB_TOKEN"):
             secret = os.getenv(name)
             if secret and secret in text:
                 raise ValueError("secrets cannot be stored in context")
@@ -559,7 +559,7 @@ class Dispatcher:
             path = root.joinpath(*parts)
             if path.is_file() and path.resolve().is_relative_to(root / task.project_id) and path.stat().st_size <= 65536:
                 content = path.read_text(encoding="utf-8", errors="replace")
-                for name in ("QWEN_API_KEY", "DECISION_API_KEY", "ORCHESTRATOR_TOKEN", "DASHBOARD_TOKEN", "GITLAB_TOKEN"):
+                for name in ("QWEN_API_KEY", "DECISION_API_KEY", "ORCHESTRATOR_TOKEN", "GITLAB_TOKEN"):
                     secret = os.getenv(name)
                     if secret:
                         content = content.replace(secret, "[REDACTED]")

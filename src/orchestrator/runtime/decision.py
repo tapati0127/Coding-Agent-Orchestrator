@@ -51,7 +51,7 @@ class DecisionRunner:
     def _redact(self, value: Any) -> Any:
         if isinstance(value, str):
             for secret in (self.api_key, *(os.getenv(key, "") for key in (
-                "QWEN_API_KEY", "DECISION_API_KEY", "ORCHESTRATOR_TOKEN", "DASHBOARD_TOKEN", "GITLAB_TOKEN",
+                "QWEN_API_KEY", "DECISION_API_KEY", "ORCHESTRATOR_TOKEN", "GITLAB_TOKEN",
             ))):
                 if secret:
                     value = value.replace(secret, "[REDACTED]")

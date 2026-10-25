@@ -14,7 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from orchestrator.dispatcher.engine import Dispatcher
 from orchestrator.dispatcher.process import DispatcherLoop
-from orchestrator.queues import DispatcherClient, start_bridge
+from orchestrator.queues import DispatcherClient
 from orchestrator.runtime.decision import DecisionRunner
 from orchestrator.runtime.qwen import QwenRunner
 from orchestrator.schemas.task import Task
@@ -29,7 +29,7 @@ async def setup(roles=None, **options):
     engine = Dispatcher(store, clock=lambda: 1000., **options)
     roles = roles or {"analyze": "ANALYZE"}
     jobs = {worker_id: Queue() for worker_id in roles}
-    loop = DispatcherLoop(engine, Queue(), jobs, roles, {})
+    loop = DispatcherLoop(engine, Queue(), jobs, roles)
     return store, engine, jobs, loop
 
 
@@ -174,22 +174,21 @@ async def test_user_request_through_communicator_and_technical_worker_without_st
     assert "PRIVATE_USER_REQUIREMENT" not in caplog.text
 
 
-async def test_manager_bridge_uses_python_queue_and_dispatcher_for_dashboard_reads():
+async def test_python_queue_submits_requests_to_dispatcher():
     context = mp.get_context("spawn")
     events = context.Queue()
-    bridge = start_bridge(events, context)
     store, engine, _, _ = await setup()
-    loop = DispatcherLoop(engine, events, {}, {}, bridge.replies(), interval=0.02)
+    loop = DispatcherLoop(engine, events, {}, {}, interval=0.02)
     task = asyncio.create_task(loop.run())
     try:
-        client = DispatcherClient(bridge)
-        assert (await client.search(("coding", "projects")))[0]["project_id"] == "p1"
-        with pytest.raises(RuntimeError, match="not allowed"):
-            await client.search(("coding", "p1", "private", "ANALYZE", "thread"))
-        assert not dict(bridge.replies())
+        client = DispatcherClient(events)
+        receipt = await client.submit("p1", "human_message", {"message": "Build API"})
+        async with asyncio.timeout(5):
+            while not await store.get(("coding", "p1", "responses", "COMMUNICATOR"), receipt["request_id"]):
+                await asyncio.sleep(.01)
+        assert len(await engine.tasks("p1")) == 1
     finally:
         events.put(None)
         await asyncio.wait_for(task, timeout=5)
-        bridge.shutdown()
         events.close()
         events.join_thread()
