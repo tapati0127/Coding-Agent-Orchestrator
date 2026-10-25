@@ -1,21 +1,59 @@
+name: coding-agent-team
+
 services:
-  orchestrator:
-    build: .
-    ports:
-      - "2026:2024"
+  team:
+    image: coding-agent-team:local
+    build:
+      context: .
+      target: team
+      args:
+        CODER_UID: ${CODER_UID:-1000}
+        CODER_GID: ${CODER_GID:-1000}
+        QWEN_CODE_VERSION: ${QWEN_CODE_VERSION:-0.26.1}
+        OPENCODE_VERSION: ${OPENCODE_VERSION:-1.19.4}
+      secrets:
+        - ca_bundle
+    init: true
+    restart: unless-stopped
     env_file:
       - .env
     environment:
+      CODING_CLI_RUNTIME: local
       WORKSPACE_ROOT: /workspace
-      DATA_ROOT: /data
-      LANGGRAPH_URL: http://127.0.0.1:2024
+      SSL_CERT_FILE: /certs/ca-bundle.pem
+      NODE_EXTRA_CA_CERTS: /certs/ca-bundle.pem
+      LANGGRAPH_URL: http://127.0.0.1:2026
+      LANGGRAPH_CLI_NO_ANALYTICS: "1"
+    ports:
+      - "2026:2026"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      - orchestrator-workspace:/workspace
-      - orchestrator-data:/data
-      - ./.local/certs:/app/.local/certs:ro
-    restart: unless-stopped
-    stop_grace_period: 30s
+      - type: bind
+        source: .
+        target: /app
+      - type: bind
+        source: ${PROJECT_WORKSPACE:-.}
+        target: /workspace
+      - type: bind
+        source: ./.local/certs/ca-bundle.pem
+        target: /certs/ca-bundle.pem
+        read_only: true
+      - team-state:/app/.langgraph_api
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:2026/ok', timeout=5)"
+      interval: 10s
+      timeout: 6s
+      start_period: 30s
+      retries: 5
+
+secrets:
+  ca_bundle:
+    file: ./.local/certs/ca-bundle.pem
 
 volumes:
-  orchestrator-workspace:
-  orchestrator-data:
+  team-state:

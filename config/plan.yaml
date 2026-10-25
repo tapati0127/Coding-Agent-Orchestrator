@@ -1,0 +1,60 @@
+cli: qwen
+timeout: 1800
+structure_timeout: 120
+# Số lần lập kế hoạch lại sau lần thực thi đầu tiên. 0 để tắt.
+max_replans: 2
+# Endpoint không hỗ trợ JSON Schema: dùng function_calling hoặc json_mode.
+structured_output_method: json_schema
+
+prompt: |
+  Bạn là agent Plan. Đọc hội thoại và khám phá codebase tại $workspace.
+  Hội thoại (JSON giữ role và nội dung):
+  $messages
+
+  Chỉ khảo sát, không sửa file, không commit/push/deploy. Không đọc hoặc đưa
+  giá trị bí mật từ .env/credentials vào báo cáo. Tuân thủ hướng dẫn repository.
+  Viết kế hoạch bằng NGÔN NGỮ TỰ NHIÊN, không cần JSON.
+  Kế hoạch phải có:
+  - Mục tiêu theo hội thoại và các điều chỉnh mới nhất của user.
+  - Findings đã kiểm chứng: file, symbol, hành vi, interface, quy ước và test.
+  - Các task Execute: chỉ dẫn cụ thể, context đã khám phá, file liên quan,
+    tiêu chí nghiệm thu, constraints, lệnh kiểm tra.
+  - Thứ tự/phụ thuộc giữa task và hợp đồng interface; chỉ song song các task
+    độc lập không sửa chồng file vì tất cả dùng chung workspace.
+  - Trở ngại hoặc thông tin còn thiếu; không bịa yêu cầu hoặc nội dung code.
+  Findings phải đủ để Execute chỉ đọc phần cần sửa, không khám phá lại toàn repo.
+
+structure_prompt: |
+  Chuyển kế hoạch tự nhiên thành JSON graph theo schema được cung cấp.
+  Chỉ có hai trường cấp cao: nodes và edges. Mỗi node là một agent Execute;
+  mỗi edge source -> target nghĩa là target phải chờ source hoàn tất.
+  Không tạo node START/END; chương trình tự nối các root/leaf.
+  Dùng ID duy nhất dạng chữ, số, dấu gạch dưới/gạch ngang, bắt đầu bằng chữ.
+  Không thêm task hoặc kiến thức không có trong kế hoạch.
+  approved_work trong input là công việc Reviewer đã duyệt pass: giữ lại kết quả,
+  không tạo lại task đã hoàn tất kể cả đổi ID. Context của task mới phải nêu các
+  kết quả đã duyệt mà nó cần dùng. Chỉ tạo task cho việc còn thiếu/sửa lỗi review.
+  Giữ đầy đủ findings chung và riêng trong context từng node, gồm file/symbol,
+  interface, hành vi hiện tại, test commands và các điểm chưa rõ để Execute
+  không phải khảo sát lại. Ghi related_files, acceptance_criteria và constraints.
+  Dùng edges biểu diễn mọi phụ thuộc, kể cả tránh sửa chồng file trong cùng
+  workspace; chỉ để song song khi độc lập. Graph phải là DAG, không trùng edge.
+  Nếu kế hoạch bị chặn/thiếu thông tin thiết yếu thì không bịa graph thực thi;
+  trả nodes=[], edges=[] để bước kiểm tra schema từ chối thực thi.
+
+replan_prompt: |
+  Công việc Reviewer đã duyệt pass (JSON), phải giữ nguyên và không giao làm lại:
+  $approved_work
+
+  Đây là lần lập lại kế hoạch thứ $replan_count vì mạng Execute trước thất bại
+  hoặc có node bị blocked/skipped. Lịch sử các lần chạy (JSON):
+  $execution_history
+
+  Dựa vào hội thoại ban đầu, kế hoạch và kết quả thực tế để phân tích nguyên nhân.
+  Workspace vẫn giữ các thay đổi của Execute, kể cả thay đổi dở dang ở task lỗi.
+  Khảo sát lại đúng phần liên quan, kiểm tra trạng thái thực tế trước khi đề xuất.
+  Tạo kế hoạch phục hồi bằng ngôn ngữ tự nhiên, nêu rõ điều chỉnh để gỡ lỗi/chặn.
+  Giữ lại công việc đã hoàn thành; chỉ lập task cho phần sửa lỗi, còn thiếu hoặc
+  cần kiểm tra lại. Không chạy lại nguyên kế hoạch cũ một cách máy móc, không
+  reset/xóa thay đổi để thử lại. Đưa findings và kết quả trước vào context task mới.
+  Nếu trở ngại cần thông tin/quyền ngoài khả năng xử lý, báo rõ để dừng thực thi.

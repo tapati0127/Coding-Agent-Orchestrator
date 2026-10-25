@@ -1,42 +1,39 @@
 # syntax=docker/dockerfile:1
-FROM node:22.20.0-bookworm-slim AS node
-FROM ghcr.io/astral-sh/uv:0.12.23 AS uv
-FROM registry.gitlab.com/gitlab-org/cli:v1.95.0 AS glab
-FROM python:3.12.12-slim-bookworm
-
+FROM node:22-bookworm-slim AS node
+FROM python:3.13-slim-bookworm AS cli
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
-COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
-COPY --from=uv /uv /usr/local/bin/uv
-COPY --from=glab /usr/bin/glab /usr/local/bin/glab
-RUN --mount=type=secret,id=proxy_ca \
-    if [ -f /run/secrets/proxy_ca ]; then \
-      cp /run/secrets/proxy_ca /usr/local/share/ca-certificates/build-proxy.crt; \
-      update-ca-certificates; \
-    fi \
-    && sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
-    && apt-get update && apt-get install -y --no-install-recommends git ca-certificates tini \
-    && rm -rf /var/lib/apt/lists/* \
-    && NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm install --global @qwen-code/qwen-code@0.26.1
+RUN apt-get update && apt-get install -y --no-install-recommends git ripgrep ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+ARG QWEN_CODE_VERSION=latest
+ARG OPENCODE_VERSION=latest
+RUN --mount=type=secret,id=ca_bundle \
+    if [ -f /run/secrets/ca_bundle ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/ca_bundle; fi; \
+    npm install -g "@qwen-code/qwen-code@${QWEN_CODE_VERSION}" "opencode-ai@${OPENCODE_VERSION}" \
+    && qwen --version && opencode --version
+COPY requirements.txt /opt/coding-tools/requirements.txt
+RUN --mount=type=secret,id=ca_bundle \
+    if [ -f /run/secrets/ca_bundle ]; then export PIP_CERT=/run/secrets/ca_bundle; fi; \
+    pip install --no-cache-dir -r /opt/coding-tools/requirements.txt
+ARG CODER_UID=1000
+ARG CODER_GID=1000
+RUN groupadd --gid ${CODER_GID} coder && useradd --uid ${CODER_UID} --gid ${CODER_GID} --create-home coder
+USER coder
+WORKDIR /home/coder
+CMD ["qwen", "--version"]
 
+# One application container contains the API and both coding CLIs.
+FROM cli AS team
+USER root
+RUN --mount=type=secret,id=ca_bundle \
+    if [ -f /run/secrets/ca_bundle ]; then export PIP_CERT=/run/secrets/ca_bundle; fi; \
+    pip install --no-cache-dir "langgraph-cli[inmem]>=0.4,<0.5"
 WORKDIR /app
-ENV UV_LINK_MODE=copy UV_COMPILE_BYTECODE=1 UV_SYSTEM_CERTS=true PYTHONUNBUFFERED=1 \
-    PATH="/app/.venv/bin:$PATH" WORKSPACE_ROOT=/workspace DATA_ROOT=/data \
-    LANGGRAPH_URL=http://127.0.0.1:2024 LANGSMITH_TRACING=false \
-    LANGGRAPH_CLI_NO_ANALYTICS=1 NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
-COPY pyproject.toml uv.lock ./
-COPY src ./src
-COPY prompts ./prompts
-COPY config ./config
-COPY skills ./skills
-RUN uv sync --frozen --no-dev
-COPY langgraph.json graph.py ./
-RUN mkdir -p /workspace /data/langgraph \
-    && ln -s /data/langgraph /app/.langgraph_api
-VOLUME ["/workspace", "/data"]
-EXPOSE 2024
-HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=5 \
-    CMD python -c "import os,urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:2024/ok', headers={'x-api-key':os.environ.get('ORCHESTRATOR_TOKEN','')}), timeout=3)"
-ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["langgraph", "dev", "--host", "0.0.0.0", "--port", "2024", "--no-browser", "--no-reload", "--n-jobs-per-worker", "10"]
+COPY --chown=coder:coder . /app
+RUN mkdir -p /app/.langgraph_api && chown coder:coder /app/.langgraph_api
+ENV CODING_CLI_RUNTIME=local WORKSPACE_ROOT=/workspace
+USER coder
+EXPOSE 2026
+CMD ["langgraph", "dev", "--config", "/app/langgraph.docker.json", "--host", "0.0.0.0", "--port", "2026", "--no-browser"]

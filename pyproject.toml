@@ -1,35 +1,26 @@
 [build-system]
-requires = ["hatchling==1.32.4"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
 [project]
-name = "multi-agent-qwen-orchestrator"
+name = "coding-agent-orchestrator"
 version = "0.1.0"
-description = "Single-container LangGraph/Qwen Code task DAG orchestrator"
-requires-python = ">=3.12,<3.14"
+requires-python = ">=3.10"
 dependencies = [
-  "langgraph==1.2.17",
-  "langgraph-cli[inmem]==0.4.38",
-  "langgraph-sdk==0.4.9",
-  "langchain-openai==1.7.2",
-  "pydantic==2.14.1",
-  "fastapi==0.162.0",
-  "uvicorn==0.54.0",
-  "httpx==0.28.1",
+  "langgraph>=1.0,<2",
+  "langchain-openai>=1.0,<2",
+  "PyYAML>=6.0,<7",
+  "python-dotenv>=1.0,<2",
 ]
 
-[dependency-groups]
-dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0"]
+[project.optional-dependencies]
+dev = ["langgraph-cli[inmem]>=0.4,<0.5"]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/orchestrator"]
+[tool.setuptools]
+py-modules = ["graph", "plan_agent", "execute_agent", "reviewer_agent", "llm_cli"]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = [".", "src"]
-asyncio_mode = "auto"
+[tool.setuptools.packages.find]
+include = ["orchestrator*"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"prompts" = "orchestrator/prompts"
-"config" = "orchestrator/config"
-"skills" = "orchestrator/skills"
+[tool.setuptools.data-files]
+config = ["config/*.yaml"]

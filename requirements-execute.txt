@@ -1,0 +1,2 @@
+# Compatibility: install the full orchestration dependencies.
+-r requirements.txt

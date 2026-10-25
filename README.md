@@ -1,260 +1,171 @@
-# Multi-Agent Qwen Code Orchestrator
+# Coding Agent Orchestrator
 
-MVP điều phối sáu loại agent bằng LangGraph Agent Server và Qwen Code, chạy trong **một container**. Dispatcher là bên duy nhất cập nhật task chính thức; người dùng chat qua LangGraph SDK, không có PostgreSQL, Redis hay backend điều phối riêng.
+LangGraph bắt đầu bằng Initialize làm rõ yêu cầu, sau đó điều phối Plan, Execute
+và Reviewer. Ba role coding dùng chung chu trình:
+**coding CLI → báo cáo tự nhiên → ChatOpenAI structured output**.
 
-Yêu cầu gốc: [docs/requirements.md](docs/requirements.md). Thiết kế và giới hạn: [docs/architecture.md](docs/architecture.md).
-
-## Chạy bằng Docker
-
-Cần Docker/Compose và một endpoint OpenAI-compatible mà container truy cập được.
+## Chạy mặc định: một container, cổng 2026
 
 ```bash
-cp .env.example .env
-# Sửa QWEN_BASE_URL, QWEN_MODEL, QWEN_API_KEY và ORCHESTRATOR_TOKEN trong .env.
 docker compose up --build -d
-docker compose logs -f
 ```
 
-Chat trực tiếp với graph `communicator` qua LangGraph SDK, dùng **ORCHESTRATOR_TOKEN**. Agent Server nghe port 2024 bên trong container; dùng host/port được map trong `docker-compose.yml` khi kết nối từ máy host.
+Container `team` có đủ LangGraph dev, Qwen Code CLI và OpenCode CLI. API ở
+http://localhost:2026, docs ở http://localhost:2026/docs. Các CLI chạy trực tiếp
+trong cùng container, yolo, mỗi lần có workdir tạm riêng tự dọn; không cần Docker
+socket hoặc container con. Compose đọc khóa/model từ .env và override đường dẫn
+workspace/CA theo container. CA bundle mount read-only, không copy vào image.
 
-Ở đầu hội thoại, Communicator liệt kê các project để chọn bằng số thứ tự, tên hoặc ID. Nếu chưa có project, hoặc bạn nói **tạo project mới**, hệ thống tự sinh ID, tạo thư mục `WORKSPACE_ROOT/<project_id>` (mặc định `/workspace/<project_id>`) và khởi tạo Git cùng commit ban đầu. Lựa chọn được lưu vào `state.project_id` của thread. Execute workers tạo worktree riêng; Verify dùng worktree integration. Tích hợp nội bộ có thể đăng ký repository có sẵn bằng request `register_project` tới Dispatcher.
+Workspace mặc định là thư mục dự án hiện tại. Đặt PROJECT_WORKSPACE trong .env
+nếu muốn sửa repository khác. Dữ liệu LangGraph được giữ trong volume team-state;
+source code mount vào /app để hot reload. Xem log bằng `docker compose logs -f team`.
+Dừng bằng `docker compose down` (giữ dữ liệu). File chứng chỉ cần có sẵn ở
+.local/certs/ca-bundle.pem. UID/GID mặc định 1000, có thể đổi CODER_UID/CODER_GID.
 
-Sau khi dependencies/image/model đã được chuẩn bị, runtime không cần Internet công cộng; `QWEN_BASE_URL` và endpoint Decision (nếu cấu hình riêng) phải tiếp tục truy cập được. Image build vẫn cần các registry hệ điều hành, Python và npm. API key không được lưu vào image, prompt hay repository.
-
-## Phát triển ngoài container
-
-Python 3.12+, Node.js 22+, Git và `uv`:
-
-```bash
-uv sync --frozen
-npm install --global @qwen-code/qwen-code@0.26.1
-cp .env.example .env
-# Cấu hình .env; dùng DATA_ROOT và WORKSPACE_ROOT có quyền ghi.
-uv run langgraph dev --host 0.0.0.0 --port 2024 --no-browser --no-reload --n-jobs-per-worker 10
-```
-
-Chỉ cần chạy `langgraph dev` từ thư mục gốc (hoặc `uv run langgraph dev` nếu chưa
-activate virtualenv). `langgraph.json` tự nạp `.env`, expose graph Communicator từ
-`graph.py` và gắn lifecycle khởi động queue, Dispatcher cùng các process agent.
-Communicator chạy trong process chính của Agent Server; Dispatcher và các agent
-kỹ thuật chạy ở process riêng. Không cần khởi động launcher trước.
-Dùng `--no-reload` để giữ ổn định các process con trong lúc chạy task.
-Dừng bằng SIGTERM/Ctrl-C để kết thúc theo thứ tự.
-
-```bash
-uv run pytest -q
-curl --fail http://127.0.0.1:2024/ok
-```
-
-Các kiểm thử tự động dùng Qwen subprocess, phản hồi HTTP LLM giả lập và Git repository tạm để xác minh protocol, quyền, DAG và cơ chế runtime. Chúng không xác minh chất lượng đầu ra mô hình nội bộ của bạn. Hãy chạy một yêu cầu thực với endpoint đã cấu hình trước khi coi luồng LLM end-to-end được nghiệm thu.
-
-## Communicator và hội thoại
-
-`langgraph.json` chỉ expose graph `communicator`. Gửi tin nhắn trực tiếp vào graph:
-
-```json
-{"messages": [{"role": "user", "content": "Tôi muốn xây dựng portal cho khách hàng"}]}
-```
-
-Client chỉ cần gửi **tin nhắn mới** trong `messages` trên cùng thread; không cần
-truyền `project_id`, `task`, `cwd` hoặc gửi lại assistant messages. Graph lưu cả
-câu trả lời vào state và phát stream khi có câu trả lời mới. Ví dụ với async SDK:
-
-```python
-import os
-from langgraph_sdk import get_client
-
-client = get_client(url=os.environ["LANGGRAPH_URL"], api_key=os.environ["ORCHESTRATOR_TOKEN"])
-thread = await client.threads.create()
-
-async def chat(text):
-    state = await client.runs.wait(thread["thread_id"], "communicator", input={
-        "messages": [{"role": "user", "content": text}]
-    })
-    print(state["messages"][-1]["content"])
-    return state
-
-await chat("Xin chào")        # Liệt kê project; nếu danh sách trống thì tự tạo.
-await chat("1")               # Chọn project số 1 khi vừa nhận danh sách.
-await chat("Thêm đăng nhập")  # Yêu cầu cho project đã chọn.
-```
-
-Nói **danh sách dự án** để chọn lại, hoặc **tạo project mới** để chuyển sang project
-mới trong cùng thread. Sau khi chọn, Communicator thông báo project và câu hỏi
-đang chờ (nếu có); tin nhắn tiếp theo tiếp tục quy trình. Lịch sử trao đổi của
-project được chuyển cho worker để không mất yêu cầu khi bắt đầu execution chain mới.
-
-Graph đọc catalog/task/approval qua `runtime.store` được LangGraph inject; mọi ghi
-project, task và conversation chính thức vẫn đi qua Dispatcher. Khi chạy local,
-truyền Store vào `builder.compile(store=store)` và dùng checkpointer để giữ state
-giữa các lượt. Agent Server tự cung cấp Store/checkpoint khi dùng cùng thread.
-Theo dõi kết thúc khi chain CLOSED, cần người dùng trả lời, hoặc bị chặn. Nói
-**tiến độ** hoặc **status** để xem chain hiện tại mà không tạo task mới. Trả lời
-câu hỏi làm rõ tiếp tục cùng chain qua `human_reply`; với quyết định kỹ thuật,
-trả lời rõ **đồng ý** hoặc **từ chối**. Đóng kết nối không hủy task nền.
-
-Communicator worker chạy hai lượt model: tạo câu trả lời hội thoại, rồi tạo
-`TaskGraphOutput` từ lịch sử và bản trả lời đó. Khi đủ rõ, Dispatcher kiểm tra và
-tạo task Analyze; nếu cần hỏi thêm, worker được nhả để chờ người dùng. Khi hết
-thời gian chờ, hệ thống vẫn tiếp tục sang Analyze và lưu thông báo timeout cùng
-các giả định. Khi lượt chat đã kết thúc chờ trả lời, có thể nhắn **tiến độ** để đọc
-cập nhật và các thông báo timeout/giả định đã lưu.
-
-Mọi queue được khai báo trong `GraphRuntime` ở [graph.py](graph.py), dùng
-`multiprocessing.get_context("spawn").Queue()` của thư viện chuẩn Python.
-Communicator đọc queue trong process chính; Analyze, Plan & Delegate, Execute,
-Verify & Integrate, Finalize và Dispatcher chạy trong các process con riêng.
-Mỗi role có một vòng `while True` đọc queue, chạy graph cho task nhận được rồi
-quay lại chờ. Execute có từ 1 đến 5 process theo `MAX_EXECUTE_WORKERS`.
+Các hướng dẫn chạy host bên dưới là lựa chọn thay thế, không cần cho Compose.
 
 ```text
-Human message → Communicator (process chính)
-                   ↓ dispatcher_queue
-              Dispatcher graph (process con)
-                   ↓ agent_queues[worker_id]
-              Agent graph → dispatcher_queue → Dispatcher
+graph.py                         # Graph điều phối và entrypoint graph/build_graph
+orchestrator/
+  schemas.py                     # PlanGraph, task và Assessment pass/fail
+  state.py                       # State của phase, agent và workflow
+  agents/
+    initialize.py                # Chat tự nhiên → structured readiness gate
+    plan.py                      # Khám phá code → kế hoạch DAG
+    execute.py                   # Triển khai → đánh giá báo cáo
+    reviewer.py                  # Kiểm tra code/test → đánh giá review
+    assessed.py                  # Adapter task/báo cáo chung Execute và Reviewer
+  runtime/
+    cli.py                       # Chạy OpenCode/Qwen với LLM nội bộ
+    two_phase.py                 # Graph dùng chung prepare → coding → structure
+    network.py                   # Build DAG, Execute → Reviewer, tái sử dụng việc đã duyệt
+config/                          # Prompt và cấu hình YAML cho từng role
+examples/                        # Ví dụ chạy workflow/Execute
+tests/                          # Unit và integration test offline
 ```
 
-Điểm bắt đầu là tin nhắn human vào graph `communicator` qua SDK. Sau khi chọn hoặc
-tạo project, Communicator gửi yêu cầu vào queue Dispatcher. Dispatcher kiểm tra
-DAG, dependencies, concurrency, claim và lease trước khi cấp snapshot cho agent.
-Communicator xử lý task hội thoại ngay trong process chính; năm role kỹ thuật
-chạy graph local trong process riêng, không gọi SDK hay đọc Store trực tiếp.
+Các file `plan_agent.py`, `execute_agent.py`, `reviewer_agent.py`, `llm_cli.py` ở
+root chỉ giữ import tương thích. Code mới dùng package `orchestrator` và entrypoint
+`graph.py`. `plan_agent.build_plan_agent` cũ vẫn trả toàn workflow;
+`orchestrator.agents.plan.build_plan_agent` chỉ trả graph Plan hai bước.
 
-**Dispatcher là nơi duy nhất quyết định ghi dữ liệu chính thức.** Native Store vẫn
-ở process Communicator do LangGraph Runtime cung cấp. Dispatcher dùng
-`QueueStoreRecords` gửi thao tác qua `store_requests`, nhận kết quả qua
-`store_responses`; `serve_store` trong process chính thực thi các thao tác đó.
-Không truyền Store object qua process, không dùng HTTP Store client hay Manager bridge.
-Communicator đọc `runtime.store` để báo tiến độ.
+## Chạy
 
-Các queue chỉ nằm trong RAM. Sau restart, Dispatcher đọc task còn lưu trong Store,
-phục hồi lease hết hạn và giao lại việc hợp lệ. `task_attempt` giúp từ chối kết quả
-cũ. Khi shutdown, lifecycle gửi sentinel dừng agent, chờ flush kết quả, dừng
-Dispatcher, rồi mới dừng dịch vụ queue Store và Agent Server. Worker chết được
-restart có giới hạn; Dispatcher chết làm runtime dừng để phục hồi bằng journal/lease.
-
-Chưa triển khai hủy task hoặc trạng thái `CANCEL`.
-
-Yêu cầu từ chat tạo task Communicator thực sự. Agent này gọi LLM với
-`prompts/communicator.md`, đứng về phía người dùng để làm rõ mục tiêu, phạm vi và
-kết quả mong muốn. Task Communicator gọi ChatOpenAI hai lượt với lịch sử
-`messages` và metadata của task: bản nháp hội thoại rồi `TaskGraphOutput` cho Dispatcher.
-Communicator chọn giao cho chính nó, hỏi human bằng `human_request`/`HUMAN_APPROVAL`,
-hoặc bàn giao bản tóm tắt yêu cầu cho Analyze.
-
-Tự giao và hỏi human đều dùng `backward_count` chung của execution chain, giới hạn
-bởi `MAX_BACKWARD_DELEGATIONS`; không có bộ đếm hỏi riêng. Trả lời không reset
-chain/budget. Khi chờ human, worker được giải phóng. Sau 30 phút mặc định, approval
-chuyển `TIMED_OUT` và Dispatcher tạo task Communicator tiếp tục trong cùng chain.
-Communicator chuyển sang Analyze với giả định nêu rõ khi hết thời gian hoặc hết
-ngân sách; không coi im lặng là phê duyệt. Người dùng từ chối thì không tự tiếp tục.
-
-State Communicator có `messages: Annotated[list[AnyMessage], add_messages]`.
-Dispatcher journal lịch sử theo chain ở namespace `conversations`; scoped context
-do Dispatcher dùng chỉ cấp lịch sử cho Communicator, Analyze và Finalize. Các agent còn lại nhận brief
-và shared contracts. SDK trả lời và stream hội thoại trên thread đã xác thực.
-Đây là giới hạn cấp context, không phải sandbox filesystem giữa các process.
-
-Analyze chỉ được giao cho Communicator hoặc Plan & Delegate. JSON Schema của
-Decision pass và Dispatcher cùng áp dụng quy tắc này; câu hỏi cho human phải qua
-task Communicator. Nếu LLM chọn sai nơi nhận, runtime yêu cầu sửa lại Decision
-pass với cùng kết quả Work pass. Số lượt quyết định tối đa theo `max_attempts` của
-task (mặc định 3, tính cả lượt đầu); các đề xuất bị loại không tạo task hoặc tiêu
-tốn backward budget. Nếu vẫn sai, lượt chạy báo lỗi để xử lý theo retry kỹ thuật.
-
-## Cấu hình
-
-Với HTTPS bị `unable to get local issuer certificate`, kiểm tra server đã gửi
-đủ intermediate chain chưa. Có thể bổ sung intermediate đã xác minh cùng các CA
-gốc đang tin cậy vào `.local/certs/ca-bundle.pem`, rồi cấu hình cả hai runtime:
-
-```dotenv
-SSL_CERT_FILE=.local/certs/ca-bundle.pem
-NODE_EXTRA_CA_CERTS=.local/certs/ca-bundle.pem
+```bash
+pip install -r requirements.txt
+python -m examples.run_plan 'Thêm API health và test'
+python -m examples.run_plan 'Thêm API health và test' --plan-only
 ```
 
-HTTPX/ChatOpenAI đọc `SSL_CERT_FILE`; Qwen Code dùng `NODE_EXTRA_CA_CERTS`.
-QwenRunner đổi đường dẫn CA tương đối thành tuyệt đối trước khi chạy trong
-worktree khác. Compose mount `.local/certs` vào `/app/.local/certs` ở chế độ chỉ
-đọc. Bundle là cấu hình local, đã được gitignore; cần tạo file trên máy chạy.
-Khởi động lại `langgraph dev`/container sau khi đổi biến CA.
+Hai CLI được cài trong image Docker, không cần cài trên host. Copy `.env.example` sang `.env` rồi cấu hình
+`QWEN_BASE_URL`, `QWEN_MODEL`, `QWEN_API_KEY`. ChatOpenAI ưu tiên `DECISION_*`,
+fallback sang `QWEN_*`. Endpoint phải gồm API prefix, thường `/v1`.
 
-Thinking được tắt cho cả hai pass. ChatOpenAI gửi `enable_thinking=false` và
-`chat_template_kwargs.enable_thinking=false` qua `extra_body`. Qwen Code nhận
-cùng các tham số trong `model.generationConfig.extra_body`, cùng `reasoning=false`,
-qua file `~/.qwen/settings.json` trong HOME riêng của từng Work session.
-Endpoint/model cần hỗ trợ tham số tương ứng để áp dụng chế độ không thinking.
+```python
+import asyncio
+from dotenv import load_dotenv
+from langchain_core.messages import HumanMessage
+from graph import build_graph
 
-Với các agent kỹ thuật, Work pass chạy Qwen Code CLI. Decision pass gửi role prompt, task/context được cấp
-và kết quả Work pass sang `langchain_openai.ChatOpenAI`, gọi bất đồng bộ bằng
-`ainvoke()`. Decision đặt `streaming=False` và `disable_streaming=True` để tắt stream,
-kể cả khi LangGraph có callback streaming. Tag `nostream` ngăn phản hồi Decision
-phát ra qua luồng `messages` của LangGraph. Riêng chat/báo tiến độ Communicator bật
-stream token và không dùng tag `nostream`; thinking vẫn tắt. Decision dùng Chat Completions với
-`response_format=json_schema` (`strict=False`); endpoint nội bộ cần hỗ trợ chế độ
-này. Runtime vẫn kiểm tra `TaskGraphOutput`, danh tính source và quyền giao task.
+async def main():
+    load_dotenv()
+    workflow = build_graph()
+    result = await workflow.ainvoke({
+        "messages": [HumanMessage(content="Thêm API health và test")],
+    }, config={"max_concurrency": 3})
+    print(result["status"], result["messages"][-1].content)
 
-Đặt `DECISION_BASE_URL`, `DECISION_API_KEY`, `DECISION_MODEL` để dùng LLM nội bộ
-cho Communicator và Decision; từng biến bỏ trống dùng giá trị `QWEN_*` tương ứng. Timeout mặc
-định 120 giây qua `DECISION_TIMEOUT_SECONDS`. SDK không tự retry; lỗi đi qua retry
-kỹ thuật hiện có. Dispatcher giới hạn số task kỹ thuật đang hoạt động trên toàn hệ thống.
-
-Skills của từng Work pass được khai báo trong [config/work_pass_skills.json](config/work_pass_skills.json).
-Mặc định `ANALYZE` dùng `gitlab-cli`; các role khác có danh sách rỗng. Thêm skill
-bằng cách khai báo đường dẫn `SKILL.md` trong `skills` rồi gán tên đó vào `agents`:
-
-```json
-{
-  "version": 1,
-  "skills": {"gitlab-cli": "../skills/gitlab-cli/SKILL.md"},
-  "agents": {"ANALYZE": ["gitlab-cli"], "EXECUTE": []}
-}
+asyncio.run(main())
 ```
 
-Đường dẫn skill tương đối được tính từ thư mục chứa config; role không được khai
-báo tương đương danh sách rỗng. Có thể đặt `WORK_PASS_SKILLS_CONFIG` tới config riêng
-(mount cả config và các skill vào container nếu dùng Docker). Runtime đọc config
-cho mỗi lượt chạy; skill thiếu/sai cấu hình báo lỗi thay vì bỏ qua âm thầm.
+`graph.py` cũng export biến `graph` đã compile cho LangGraph. Import module chỉ
+build cấu trúc, không gọi CLI/API. Caller tự load môi trường trước khi invoke.
 
-Orchestrator nạp nội dung skill trực tiếp vào **Work prompt**, giữ Qwen `--safe-mode`;
-đây không phải native skill discovery của Qwen. Decision pass chỉ nhận role prompt,
-task/context và kết quả Work pass, không được nạp bộ skill hay nhận GitLab credentials.
-Theo [tài liệu Qwen](https://github.com/QwenLM/qwen-code/blob/main/docs/users/support/troubleshooting.md),
-safe mode vô hiệu hóa cơ chế custom skills tự động.
+## Luồng thực thi
 
-[Skill GitLab CLI](skills/gitlab-cli/SKILL.md) hướng dẫn Analyze đọc issue, MR, diff
-và CI evidence qua `glab`, không thực hiện thay đổi GitLab. Dockerfile lấy binary
-`glab` từ image chính thức phiên bản `v1.95.0`; khi chạy local cần cài `glab` trên PATH
-(ví dụ `brew install glab` trên macOS). Đặt `GITLAB_HOST` cho instance cần truy cập và
-`GITLAB_TOKEN` khi cần xác thực; runtime chỉ truyền chúng cho Work pass được gán
-skill `gitlab-cli`, không đọc credential config từ HOME của người chạy. Cách xác thực
-bằng biến môi trường được mô tả trong [tài liệu GitLab](https://docs.gitlab.com/cli/auth/login/).
-Skill là hướng dẫn sử dụng, không thay đổi `yolo` hay khóa shell thành read-only;
-quyền truy cập GitLab còn phụ thuộc token được cấp.
+```mermaid
+flowchart TD
+    S([START]) --> I[Initialize: Chat tự nhiên → structured readiness]
+    I -- đủ rõ --> P[Plan: CLI → structured DAG]
+    I -- còn thiếu --> C([END: needs_clarification, trả câu hỏi])
+    P --> E[Build mạng task từ nodes và edges]
+    E --> X[Execute: CLI → structured pass/fail]
+    X -- pass --> R[Reviewer: CLI → structured pass/fail]
+    X -- fail --> F[Kết quả mạng thất bại]
+    R -- fail --> F
+    R -- pass --> A[Ghi approved_work; cho task phụ thuộc chạy]
+    A --> D{Mọi task đã hoàn tất?}
+    D -- chưa --> X
+    D -- rồi --> Z([END: completed])
+    F --> B{Còn lượt replan?}
+    B -- có --> P
+    B -- hết --> Q([END: failed])
+```
 
-| Biến | Ý nghĩa |
-| --- | --- |
-| `ORCHESTRATOR_TOKEN` | Token API nội bộ Agent Server và SDK chat |
-| `QWEN_BASE_URL`, `QWEN_API_KEY`, `QWEN_MODEL` | Endpoint/model OpenAI-compatible cho Qwen Code |
-| `DECISION_BASE_URL`, `DECISION_API_KEY`, `DECISION_MODEL` | LLM nội bộ cho Decision; từng giá trị mặc định theo `QWEN_*` |
-| `DECISION_TIMEOUT_SECONDS` | Timeout Decision LLM; mặc định 120 giây |
-| `WORK_PASS_SKILLS_CONFIG` | Đường dẫn config skills riêng; bỏ trống để dùng config đi kèm |
-| `GITLAB_HOST`, `GITLAB_TOKEN` | Host/token GitLab cho Work pass được gán skill `gitlab-cli` |
-| `MAX_EXECUTE_WORKERS` | 1–5 Execute workers |
-| `MAX_QWEN_SESSIONS` | 1–5 lượt xử lý đồng thời; mỗi lượt giữ slot qua Work và Decision |
-| `MAX_BACKWARD_DELEGATIONS` | Tối đa 3 lần quay ngược trên execution chain |
-| `MAX_TECHNICAL_RETRIES` | Retry kỹ thuật riêng; mặc định 3 |
-| `HUMAN_RESPONSE_TIMEOUT_SECONDS` | Thời gian chờ human của Communicator; mặc định 1800 giây |
-| `TASK_LEASE_SECONDS` | Thời hạn lease task; heartbeat gia hạn |
-| `WORKSPACE_ROOT` | Git repositories, worktrees và artifacts |
-| `DATA_ROOT` | Journal Dispatcher và dữ liệu runtime phát triển |
+Task độc lập có thể chạy song song. Join chờ mọi predecessors; Execute hoặc
+Reviewer fail khiến descendants skipped. Các nhánh độc lập hoàn tất trước khi
+replan. Plan nhận lịch sử và approved_work để giữ phần đã duyệt. Runtime tái sử
+dụng task có cùng yêu cầu/criteria/files/constraints, kể cả đổi ID. Mặc định có
+hai lần replan sau lần đầu (`config/plan.yaml: max_replans`).
 
-Qwen Code được pin `0.26.1`. Adapter map biến `QWEN_*` sang provider OpenAI của CLI (`OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`) trong child process; đây không phải tên biến CLI giả định hỗ trợ trực tiếp.
+Kiểm tra offline:
 
-## Giới hạn cần biết
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+```
 
-- `langgraph dev` là runtime phát triển. Store/checkpoint dùng file local của phiên bản đã pin; volume và orderly restart không đồng nghĩa transaction bền vững hoặc khả năng phục hồi mọi crash.
-- Dispatcher có journal/replay và request idempotency; không tuyên bố exactly-once khi mọi process/máy dừng đột ngột.
-- Scoped context và token tách biệt ngăn truy cập API/private ngoài luồng cho phép. Code do Qwen chạy trong cùng container có cùng quyền filesystem; worktree không phải sandbox bảo mật. Chỉ chạy repository và yêu cầu được tin cậy.
-- Hiện thực có thể kiểm thử không cần key; gọi mô hình thật, E2E ứng dụng đích và nghiệm thu cuối vẫn phụ thuộc endpoint/model, repository và tiêu chí của dự án được giao.
+Xem [chi tiết cấu hình và giới hạn](docs/plan-execute.md).
+
+Initialize hỏi làm rõ hoặc xác nhận yêu cầu trong `messages`. Structured output
+quyết định `ready_for_plan`; nếu chưa rõ thì dừng với `needs_clarification`.
+Caller nối câu trả lời của user vào messages nhận được rồi invoke lại (hoặc
+sử dụng lịch sử thread của môi trường LangGraph).
+
+Không cần truyền workspace: dùng `WORKSPACE_ROOT` từ môi trường, fallback thư
+mục làm việc hiện tại. Giá trị workspace tường minh vẫn được chấp nhận để tương
+thích. Mọi báo cáo tự nhiên tạo AIMessage mới; bước structured không trả messages,
+được tag `no_stream` và tắt streaming model. UI khi stream messages cần lọc event
+có tag `no_stream`. Prompt Initialize ở `config/initialize.yaml`.
+
+Thông báo tiến độ theo mốc bắt đầu/kết thúc, không dùng timer. Mỗi role có node
+announce_start/announce_result; root có announce_execution/summarize_execution.
+Message tiến độ cùng ID được thay thế thay vì append. Để xem ngay khi node trả
+kết quả: `python -m examples.stream_progress 'Thêm API health và test'`, hoặc dùng
+`astream(..., stream_mode="updates", subgraphs=True)` và upsert theo message.id.
+
+Coding CLI luôn tự chấp thuận (Qwen --yolo, OpenCode permission=allow). Mỗi lần
+chạy có cwd tạm riêng với project/ trỏ tới workspace thật; thư mục tạm tự dọn khi
+xong/lỗi/timeout, thay đổi code được giữ. AGENT_WORKDIR_ROOT có thể chọn nơi đặt
+các thư mục tạm. Đây là scratch directory, không phải git worktree độc lập.
+
+## LangGraph dev trên host
+
+```bash
+.venv/bin/python scripts/dev.py --host 127.0.0.1 --port 2024
+```
+
+Cấu hình `langgraph.json` nạp graph `team` từ `graph.py:graph`. Launcher đọc .env,
+chuẩn hóa SSL_CERT_FILE và NODE_EXTRA_CA_CERTS thành đường dẫn tuyệt đối (mặc định
+.local/certs/ca-bundle.pem), rồi exec langgraph dev. Không cần mount khi chạy host;
+các coding CLI tự kế thừa CA bundle qua môi trường, kể cả khi cwd là thư mục tạm.
+WORKSPACE_ROOT phải là thư mục host có thật, không dùng đường dẫn /workspace của
+container cũ. Khi CODING_CLI_RUNTIME=docker, host chỉ cần Docker; hai CLI nằm trong image.
+
+API: http://127.0.0.1:2024 — Docs: http://127.0.0.1:2024/docs.
+Nếu cần cài môi trường mới: `pip install -e ".[dev]"`.
+
+## Tùy chọn khác: Coding CLI chạy Docker, LangGraph dev chạy host
+
+```bash
+docker build --network host --secret id=ca_bundle,src=.local/certs/ca-bundle.pem -t coding-agent-cli:local .
+.venv/bin/python scripts/dev.py
+```
+
+.env dùng CODING_CLI_RUNTIME=docker và CODING_CLI_IMAGE=coding-agent-cli:local.
+Mỗi invocation tạo container --rm riêng, chạy yolo, mount workspace và scratch
+vào cùng đường dẫn tuyệt đối, mount CA bundle read-only và chuyển hai biến
+SSL_CERT_FILE/NODE_EXTRA_CA_CERTS. Timeout sẽ xóa container trước khi dọn workdir.
+API key chỉ truyền qua môi trường. Container dùng network host để truy cập LLM
+nội bộ/localhost trên Linux; không mount Docker socket vào coding container.
+User coder trong image mặc định UID/GID 1000; đổi build args CODER_UID/CODER_GID
+nếu user host khác. QWEN_CODE_VERSION và OPENCODE_VERSION cho phép pin bản CLI.

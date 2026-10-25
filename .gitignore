@@ -15,3 +15,7 @@ build/
 .local/
 
 .langgraph_api.backup-*
+
+orchestrator-data/
+
+orchestrator-workspace/

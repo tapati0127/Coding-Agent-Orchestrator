@@ -1,214 +1,109 @@
-"""Application entrypoint: Communicator in this process, other graphs in children.
+"""Top-level Plan -> Execute/Reviewer network -> replan workflow.
 
-All inter-process queues are created here using Python's multiprocessing.Queue.
-Importing this module never starts a process or allocates a queue.
+Use build_graph() for custom configuration; graph is the default compiled graph.
+Importing this module builds graph structure only, without CLI/API calls.
 """
-from __future__ import annotations
-
-import asyncio
-from contextlib import asynccontextmanager
-import logging
-import multiprocessing as mp
-import os
-import signal
-from queue import Empty
-import time
-from typing import TypedDict
-
+from pathlib import Path
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
-from orchestrator.config import Settings
-from orchestrator.dispatcher.main import run_dispatcher_records
-from orchestrator.graphs.communicator import graph
-from orchestrator.queues import configure_dispatcher
-from orchestrator.store import QueueStoreRecords, StoreRecords, serve_store
-from orchestrator.workers.main import Worker
-
-log = logging.getLogger(__name__)
-
-
-def worker_specs(settings):
-    roles = {"communicator-01": "COMMUNICATOR", "analyze-01": "ANALYZE",
-             "plan_delegate-01": "PLAN_DELEGATE", "verify_integrate-01": "VERIFY_INTEGRATE",
-             "finalize-01": "FINALIZE"}
-    roles.update({f"execute-{i:02d}": "EXECUTE" for i in range(1, settings.max_execute_workers + 1)})
-    return roles
+from orchestrator.agents.plan import build_plan_agent
+from orchestrator.agents.initialize import build_initialize_agent
+from orchestrator.agents.execute import build_execute_agent
+from orchestrator.agents.reviewer import build_reviewer_agent
+from orchestrator.runtime.network import build_execution_graph, task_signature, message_delta
+from orchestrator.runtime.two_phase import CONFIG_ROOT, read_settings
+from orchestrator.runtime.status import team_progress
+from orchestrator.schemas import PlanGraph
+from orchestrator.state import WorkflowState as PlanState
 
 
-async def agent_loop(agent, worker_id, inbox, events, settings):
-    """Run each assigned graph once, then wait for its next queue message."""
-    worker = Worker(agent, worker_id, events, data_root=settings.data_root)
-    while True:
-        try:
-            job = await asyncio.to_thread(inbox.get, True, .2)
-        except Empty:
-            continue
-        if job is None:
-            return
-        if job["task"]["lease_expires_at"] <= time.time():
-            continue
-        await worker.execute(job)
+def build_graph(config_path: str | Path = CONFIG_ROOT / 'plan.yaml', *,
+                initialize_config_path: str | Path | None = None,
+                execute_config_path: str | Path | None = None,
+                reviewer_config_path: str | Path | None = None,
+                dispatch_execute: bool = True, **llm_options):
+    settings = read_settings(config_path)
+    max_replans = settings.get('max_replans', 2)
+    if isinstance(max_replans, bool) or not isinstance(max_replans, int) or max_replans < 0:
+        raise ValueError('max_replans must be a nonnegative integer')
+    if max_replans and (not isinstance(settings.get('replan_prompt'), str) or not settings['replan_prompt'].strip()):
+        raise ValueError('Missing replan_prompt')
+    initialize_options = {'config_path': initialize_config_path} if initialize_config_path else {}
+    initializer = build_initialize_agent(**initialize_options, **llm_options)
+    planner = build_plan_agent(config_path, **llm_options)
+    execute_options = {'config_path': execute_config_path} if execute_config_path else {}
+    reviewer_options = {'config_path': reviewer_config_path} if reviewer_config_path else {}
+    executor = build_execute_agent(**execute_options, **llm_options) if dispatch_execute else None
+    reviewer = build_reviewer_agent(**reviewer_options, **llm_options) if dispatch_execute else None
+
+    def prepare_replan(state: PlanState):
+        return {"replan_count": state["replan_count"] + 1, "messages": [team_progress("Team đang lập lại kế hoạch và giữ nguyên công việc đã được Reviewer duyệt.")]}
+
+    def announce_execution(state: PlanState):
+        count = len(state['plan']['nodes'])
+        return {'messages': [team_progress(f'Bắt đầu thực thi {count} nhiệm vụ; mỗi Execute pass sẽ được Reviewer kiểm tra lại.')]}
+
+    def summarize_execution(state: PlanState):
+        results = state['results']
+        passed = sum(item['status'] == 'completed' for item in results.values())
+        failed = [key for key, item in results.items() if item['status'] == 'failed']
+        skipped = [key for key, item in results.items() if item['status'] == 'skipped']
+        content = f'Kết quả lần chạy: {passed}/{len(results)} nhiệm vụ đã được Reviewer duyệt.'
+        if failed:
+            content += ' Chưa đạt: ' + ', '.join(failed) + '.'
+        if skipped:
+            content += ' Chưa chạy do phụ thuộc: ' + ', '.join(skipped) + '.'
+        if state['status'] == 'failed':
+            content += (' Team sẽ lập lại kế hoạch.' if state['replan_count'] < max_replans
+                        else ' Đã hết lượt lập lại kế hoạch; cần xử lý các trở ngại còn lại.')
+        return {'messages': [team_progress(content)]}
+
+    async def run_network(state: PlanState, config: RunnableConfig):
+        network = build_execution_graph(PlanGraph.model_validate(state["plan"]), executor,
+            reviewer=reviewer, messages=state["messages"], approved_work=state["approved_work"])
+        network_config = {**config, "recursion_limit": max(config.get("recursion_limit", 25), len(state["plan"]["nodes"]) + 2)}
+        result = await network.ainvoke({"workspace": state["workspace"], "results": {}, "messages": state["messages"]}, config=network_config)
+        success = all(item["status"] == "completed" for item in result["results"].values())
+        approved = {task_signature(item["task"]): item for item in state["approved_work"]}
+        for task in state["plan"]["nodes"]:
+            entry = result["results"][task["id"]]
+            if entry["status"] == "completed" and entry.get("review", {}).get("assessment", {}).get("status") == "pass":
+                approved[task_signature(task)] = {"task": task, "result": entry}
+        history = [*state["execution_history"], {
+            "attempt": state["replan_count"] + 1,
+            "natural_plan": state["natural_plan"], "plan": state["plan"],
+            "results": result["results"],
+        }]
+        error = ""
+        if not success:
+            error = "Some Execute nodes failed, blocked or were skipped"
+            if state["replan_count"] >= max_replans:
+                error += f"; replan limit reached ({max_replans})"
+        return {"results": result["results"], "execution_history": history, "approved_work": list(approved.values()),
+                "status": "completed" if success else "failed", "error": error,
+                "messages": message_delta(result.get("messages", []), state["messages"])}
+
+    workflow = StateGraph(PlanState)
+    workflow.add_node('initialize', initializer)
+    workflow.add_node('plan', planner)
+    workflow.add_edge(START, 'initialize')
+    workflow.add_conditional_edges('initialize', lambda s: 'plan'
+        if s['status'] == 'ready_for_plan' else END, ['plan', END])
+    if dispatch_execute:
+        workflow.add_node('announce_execution', announce_execution)
+        workflow.add_node('execute_network', run_network)
+        workflow.add_node('summarize_execution', summarize_execution)
+        workflow.add_node('prepare_replan', prepare_replan)
+        workflow.add_conditional_edges('plan', lambda s: 'announce_execution' if s['status'] == 'planned' else END, ['announce_execution', END])
+        workflow.add_edge('announce_execution', 'execute_network')
+        workflow.add_edge('execute_network', 'summarize_execution')
+        workflow.add_conditional_edges('summarize_execution', lambda s: 'prepare_replan'
+            if s['status'] == 'failed' and s['replan_count'] < max_replans else END, ['prepare_replan', END])
+        workflow.add_edge('prepare_replan', 'plan')
+    else:
+        workflow.add_edge('plan', END)
+    return workflow.compile().with_config(recursion_limit=max(25, 6 * (max_replans + 1) + 5))
 
 
-def agent_process(agent, worker_id, inbox, events, settings):
-    for name in settings.__dataclass_fields__:
-        os.environ[name.upper()] = str(getattr(settings, name))
-    # Own a process group; SIGTERM cancels asyncio so Qwen cleanup can run.
-    if hasattr(os, "setsid"):
-        os.setsid()
-    def stop(*_):
-        raise KeyboardInterrupt
-
-    signal.signal(signal.SIGTERM, stop)
-    try:
-        asyncio.run(agent_loop(agent, worker_id, inbox, events, settings))
-    except KeyboardInterrupt:
-        pass
-
-
-class DispatcherState(TypedDict):
-    pass
-
-
-def dispatcher_process(events, inboxes, roles, requests, responses, ready, settings):
-    for name in settings.__dataclass_fields__:
-        os.environ[name.upper()] = str(getattr(settings, name))
-    records = QueueStoreRecords(requests, responses)
-
-    async def dispatch(state):
-        # DispatcherLoop owns the while True queue reader and scheduler.
-        await run_dispatcher_records(records, events, inboxes, roles, settings, on_ready=ready.set)
-        return {}
-
-    builder = StateGraph(DispatcherState)
-    builder.add_node("dispatch", dispatch)
-    builder.add_edge(START, "dispatch")
-    builder.add_edge("dispatch", END)
-    asyncio.run(builder.compile().ainvoke({}))
-
-
-class GraphRuntime:
-    """Own queues and child graph processes for one Communicator server."""
-
-    def __init__(self, store, settings):
-        if store is None:
-            raise RuntimeError("Graph runtime requires a LangGraph runtime store")
-        self.settings = settings
-        self.context = mp.get_context("spawn")
-        self.roles = worker_specs(settings)
-        # Queue declarations live in the outer graph.py, never in model graphs.
-        self.dispatcher_queue = self.context.Queue()
-        self.agent_queues = {worker_id: self.context.Queue() for worker_id in self.roles}
-        self.store_requests = self.context.Queue()
-        self.store_responses = self.context.Queue()
-        self.ready = self.context.Event()
-        self.store = StoreRecords(store)
-        self.processes = {}
-        self.restarts = {}
-        self.started = {}
-        self.closing = False
-
-    def spawn_agent(self, worker_id):
-        process = self.context.Process(name=worker_id, target=agent_process,
-            args=(self.roles[worker_id], worker_id, self.agent_queues[worker_id],
-                  self.dispatcher_queue, self.settings))
-        process.start()
-        self.processes[worker_id] = process
-        self.started[worker_id] = time.monotonic()
-
-    async def start(self):
-        configure_dispatcher(self.dispatcher_queue)
-        self.store_task = asyncio.create_task(serve_store(self.store, self.store_requests, self.store_responses))
-        dispatcher = self.context.Process(name="dispatcher", target=dispatcher_process,
-            args=(self.dispatcher_queue, self.agent_queues, self.roles, self.store_requests,
-                  self.store_responses, self.ready, self.settings))
-        await asyncio.to_thread(dispatcher.start)
-        self.processes["dispatcher"] = dispatcher
-        async with asyncio.timeout(90):
-            while not self.ready.is_set():
-                if not dispatcher.is_alive():
-                    raise RuntimeError("Dispatcher stopped during startup")
-                if self.store_task.done():
-                    await self.store_task
-                await asyncio.sleep(.05)
-        # Communicator consumes its queue in the main process, alongside SDK chat.
-        self.communicator_task = asyncio.create_task(agent_loop("COMMUNICATOR", "communicator-01",
-            self.agent_queues["communicator-01"], self.dispatcher_queue, self.settings))
-        for worker_id, agent in self.roles.items():
-            if agent != "COMMUNICATOR":
-                await asyncio.to_thread(self.spawn_agent, worker_id)
-        self.monitor_task = asyncio.create_task(self.monitor())
-
-    async def monitor(self):
-        while True:
-            await asyncio.sleep(.25)
-            if self.store_task.done() or self.communicator_task.done() or not self.processes["dispatcher"].is_alive():
-                log.error("A required graph runtime component stopped")
-                os.kill(os.getpid(), signal.SIGTERM)
-                return
-            for worker_id, process in list(self.processes.items()):
-                if worker_id == "dispatcher" or process.is_alive():
-                    continue
-                await asyncio.to_thread(process.join)
-                window = float(os.getenv("WORKER_RESTART_WINDOW_SECONDS", "300"))
-                count = 0 if time.monotonic() - self.started[worker_id] >= window else self.restarts.get(worker_id, 0)
-                if count >= int(os.getenv("WORKER_MAX_RESTARTS", "3")):
-                    log.error("Worker %s exceeded restart budget", worker_id)
-                    os.kill(os.getpid(), signal.SIGTERM)
-                    return
-                self.restarts[worker_id] = count + 1
-                await asyncio.to_thread(self.spawn_agent, worker_id)
-
-    async def stop(self):
-        if self.closing:
-            return
-        self.closing = True
-        if hasattr(self, "monitor_task"):
-            self.monitor_task.cancel()
-            await asyncio.gather(self.monitor_task, return_exceptions=True)
-        for inbox in self.agent_queues.values():
-            await asyncio.to_thread(inbox.put, None)
-        # Keep serving Store while workers flush results and Dispatcher applies them.
-        deadline = time.monotonic() + 10
-        for name, process in self.processes.items():
-            if name != "dispatcher":
-                await asyncio.to_thread(process.join, max(0, deadline - time.monotonic()))
-                await self.stop_process(process)
-        if hasattr(self, "communicator_task"):
-            try:
-                await asyncio.wait_for(asyncio.shield(self.communicator_task), max(.1, deadline - time.monotonic()))
-            except TimeoutError:
-                self.communicator_task.cancel()
-                await asyncio.gather(self.communicator_task, return_exceptions=True)
-        await asyncio.to_thread(self.dispatcher_queue.put, None)
-        dispatcher = self.processes.get("dispatcher")
-        if dispatcher:
-            await asyncio.to_thread(dispatcher.join, 10)
-            await self.stop_process(dispatcher)
-        await asyncio.to_thread(self.store_requests.put, None)
-        if hasattr(self, "store_task"):
-            await self.store_task
-        configure_dispatcher(None)
-        for queue in [self.dispatcher_queue, *self.agent_queues.values(), self.store_requests, self.store_responses]:
-            queue.cancel_join_thread()
-            queue.close()
-        self.processes.clear()
-
-    @staticmethod
-    async def stop_process(process):
-        if process.is_alive():
-            await asyncio.to_thread(process.terminate)
-            await asyncio.to_thread(process.join, 5)
-        if process.is_alive():
-            await asyncio.to_thread(process.kill)
-        await asyncio.to_thread(process.join)
-
-
-@asynccontextmanager
-async def graph_lifespan(runtime, settings):
-    application = await asyncio.to_thread(GraphRuntime, runtime.store, settings)
-    try:
-        await application.start()
-        yield application
-    finally:
-        await application.stop()
+graph = build_graph()
