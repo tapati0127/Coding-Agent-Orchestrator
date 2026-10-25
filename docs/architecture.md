@@ -2,11 +2,11 @@
 
 ## Process và dữ liệu
 
-Một Supervisor chạy Agent Server, Dispatcher và các worker độc lập trong một container. Sáu graph không có cạnh giao việc với nhau. Cả sáu graph gọi Qwen hai pass: thực hiện nhiệm vụ rồi quyết định JSON theo cùng `TaskGraphOutput`. Communicator có prompt riêng hướng người dùng, không được cấp công cụ đọc/sửa repository. Dashboard enqueue yêu cầu, Dispatcher tạo task Communicator trước Analyze.
+Một Supervisor chạy Agent Server, Dispatcher và các worker độc lập trong một container. Sáu graph không có cạnh giao việc với nhau. Cả sáu graph chạy hai pass: Work qua Qwen Code CLI, rồi Decision qua LangChain `ChatOpenAI.ainvoke()` để sinh JSON theo cùng `TaskGraphOutput`. Decision đặt `streaming=False`, `disable_streaming=True`, tag `nostream`, dùng Chat Completions JSON Schema và cấu hình `DECISION_*` (bỏ trống thì kế thừa `QWEN_*`). Communicator có prompt riêng hướng người dùng, không được cấp công cụ đọc/sửa repository. Dashboard enqueue yêu cầu, Dispatcher tạo task Communicator trước Analyze.
 
 Worker gửi claim, heartbeat và kết quả vào request inbox. Dispatcher kiểm tra quyền sở hữu task/lease, schema, DAG, ALL-join, outcome, chuyển trạng thái, tích hợp Git và backward budget, rồi ghi tasks/plans/events/receipts. Worker không ghi namespace task chính thức. Store là dữ liệu liên graph; checkpoint không thay thế Store.
 
-Số Execute workers có thể tới 5, nhưng mọi graph Qwen dùng chung giới hạn 5 subprocess. Limiter dùng semaphore theo process và phạm vi `DATA_ROOT`, với chờ bất đồng bộ không block event loop; giới hạn vẫn áp dụng khi graph chạy trên nhiều event loop trong Agent Server. Supervisor truyền rõ `--n-jobs-per-worker 10`: CLI đã pin mặc định chỉ một background run và ghi đè cấu hình concurrency chỉ đặt bằng biến môi trường. Chỉ graph Verify được `IN_REVIEW`. Chỉ Finalize được đề nghị đóng các task hợp lệ; Dispatcher thực hiện đóng. Rework tạo task mới để giữ lịch sử, không mở lại task `DONE`. Node rework có thể khai báo `replaces_task_id` để thay một task `DONE` thất bại cùng vai trò. Dispatcher giữ nguyên status/outcome cũ, kiểm tra replacement và dùng alias tới task thay thế để các task downstream đang chờ theo dõi kết quả rework đã được chấp nhận; không âm thầm sửa dependency của task đang chạy.
+Số Execute workers có thể tới 5, nhưng mọi graph dùng chung giới hạn 5 lượt xử lý, mỗi lượt giữ slot xuyên suốt Work và Decision (kể cả sửa quyết định). Limiter dùng semaphore theo process và phạm vi `DATA_ROOT`, với chờ bất đồng bộ không block event loop; giới hạn vẫn áp dụng khi graph chạy trên nhiều event loop trong Agent Server. Supervisor truyền rõ `--n-jobs-per-worker 10`: CLI đã pin mặc định chỉ một background run và ghi đè cấu hình concurrency chỉ đặt bằng biến môi trường. Chỉ graph Verify được `IN_REVIEW`. Chỉ Finalize được đề nghị đóng các task hợp lệ; Dispatcher thực hiện đóng. Rework tạo task mới để giữ lịch sử, không mở lại task `DONE`. Node rework có thể khai báo `replaces_task_id` để thay một task `DONE` thất bại cùng vai trò. Dispatcher giữ nguyên status/outcome cũ, kiểm tra replacement và dùng alias tới task thay thế để các task downstream đang chờ theo dõi kết quả rework đã được chấp nhận; không âm thầm sửa dependency của task đang chạy.
 
 Communicator dùng `backward_count` chung khi tự giao hoặc hỏi human, không có bộ đếm hỏi riêng. Approval của Communicator có deadline (mặc định 1800 giây). Trả lời hoặc timeout tạo task Communicator trong cùng chain qua journal/receipt hiện có; timeout ghi SystemMessage, không giả tạo HumanMessage hay phê duyệt. Khi timeout hoặc hết ngân sách, Communicator bàn giao Analyze với giả định công khai. Từ chối không tiếp tục. Task hỏi đã DONE/SUCCESS vì lượt giao tiếp hoàn tất; không giữ lease khi chờ human.
 
@@ -18,8 +18,11 @@ Work pass có bộ skills riêng theo `config/work_pass_skills.json` (override b
 `WORK_PASS_SKILLS_CONFIG`). Runtime nạp các file SKILL.md đã cấu hình vào prompt
 trong thread chuẩn bị, không nạp từ task/model output và không tắt Qwen safe mode.
 GitLab credentials chỉ vào subprocess Work có skill `gitlab-cli`; Decision pass
-và các lần sửa quyết định dùng HOME riêng, không nhận skill/env của Work. Lịch sử
-Qwen, config và credential cache của từng pass nằm trong thư mục riêng của pass.
+và các lần sửa quyết định chỉ gửi task/context đã lọc, role prompt và kết quả Work
+đến LLM, không có tool hoặc bộ skill Work. Qwen dùng HOME riêng cho Work;
+Decision dùng HTTP client riêng cho mỗi invocation và đóng khi hoàn tất/lỗi/hủy.
+Cả hai pass ghi log private đã che credentials; Decision chỉ phát sự kiện hoàn tất,
+không stream token. Timeout và lỗi LLM đi qua cơ chế retry kỹ thuật hiện có.
 Skill không thay thế quyền công cụ, sandbox hoặc quyền token GitLab.
 
 Agent Server phục vụ cả `/dashboard` và API giao diện `/api/*`. Built-in Store/thread/run API dùng ORCHESTRATOR_TOKEN. API giao diện dùng DASHBOARD_TOKEN khác, chỉ cung cấp projection công khai và enqueue yêu cầu người dùng. Không có endpoint giao diện nào cho browser ghi task/plan authoritative.
@@ -40,7 +43,7 @@ Store `put/get/search` không phải multi-record transaction. Journal ghi ý đ
 
 ## Kiểm chứng
 
-Chạy `uv run pytest -q` để kiểm tra schema, vòng đời, idempotency/recovery, claim, dependency ALL-join, concurrency, privacy, Qwen hai pass và Git worktree/integration. Smoke test Agent Server phải gọi một graph và xác nhận Store thật, tách với tests in-memory.
+Chạy `uv run pytest -q` để kiểm tra schema, vòng đời, idempotency/recovery, claim, dependency ALL-join, concurrency, privacy, Qwen Work + LangChain Decision và Git worktree/integration. Smoke test Agent Server phải gọi một graph và xác nhận Store thật, tách với tests in-memory.
 
 Nghiệm thu Docker cần build image, khởi động một container, chờ `/ok`, kiểm tra API riêng, ghi dữ liệu Store bằng runtime token, restart rồi đọc lại; worktree và artifact cần được đối chiếu trước/sau. Chỉ công bố phần kiểm chứng đã thực sự chạy. LLM end-to-end thật cần credentials hợp lệ và endpoint nội bộ; fake subprocess trong unit test không thay thế kiểm thử này.
 

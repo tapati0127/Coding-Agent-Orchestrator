@@ -20,7 +20,7 @@ Dashboard nằm ở đường dẫn `/dashboard` trên port 2024. Compose mặc 
 
 Project phải trỏ tới một repository Git có commit bên trong `/workspace` của container. Đưa repository vào volume hoặc mount một thư mục Git có sẵn tại `/workspace/repositories/<project_id>`. Tạo project trên Dashboard bằng đường dẫn đó, rồi gửi yêu cầu. Execute workers tạo worktree riêng; Verify dùng worktree integration. Repository rỗng cần một commit ban đầu trước khi cấp worktree.
 
-Sau khi dependencies/image/model đã được chuẩn bị, runtime không cần Internet công cộng; `QWEN_BASE_URL` phải tiếp tục truy cập được. Image build vẫn cần các registry hệ điều hành, Python và npm. API key không được lưu vào image, prompt hay repository.
+Sau khi dependencies/image/model đã được chuẩn bị, runtime không cần Internet công cộng; `QWEN_BASE_URL` và endpoint Decision (nếu cấu hình riêng) phải tiếp tục truy cập được. Image build vẫn cần các registry hệ điều hành, Python và npm. API key không được lưu vào image, prompt hay repository.
 
 ## Phát triển ngoài container
 
@@ -44,7 +44,7 @@ uv run pytest -q
 curl --fail http://127.0.0.1:2024/ok
 ```
 
-Các kiểm thử tự động dùng Qwen subprocess giả lập hoặc Git repository tạm để xác minh protocol, quyền, DAG và cơ chế runtime. Chúng không xác minh chất lượng đầu ra mô hình nội bộ của bạn. Hãy chạy một yêu cầu thực với endpoint đã cấu hình trước khi coi luồng LLM end-to-end được nghiệm thu.
+Các kiểm thử tự động dùng Qwen subprocess, phản hồi HTTP LLM giả lập và Git repository tạm để xác minh protocol, quyền, DAG và cơ chế runtime. Chúng không xác minh chất lượng đầu ra mô hình nội bộ của bạn. Hãy chạy một yêu cầu thực với endpoint đã cấu hình trước khi coi luồng LLM end-to-end được nghiệm thu.
 
 ## Communicator và hội thoại
 
@@ -69,12 +69,25 @@ và shared contracts. Dashboard hiển thị hội thoại cho người dùng đ
 
 Analyze chỉ được giao cho Communicator hoặc Plan & Delegate. JSON Schema của
 Decision pass và Dispatcher cùng áp dụng quy tắc này; câu hỏi cho human phải qua
-task Communicator. Nếu Qwen chọn sai nơi nhận, runtime yêu cầu sửa lại Decision
+task Communicator. Nếu LLM chọn sai nơi nhận, runtime yêu cầu sửa lại Decision
 pass với cùng kết quả Work pass. Số lượt quyết định tối đa theo `max_attempts` của
 task (mặc định 3, tính cả lượt đầu); các đề xuất bị loại không tạo task hoặc tiêu
 tốn backward budget. Nếu vẫn sai, lượt chạy báo lỗi để xử lý theo retry kỹ thuật.
 
 ## Cấu hình
+
+Work pass chạy Qwen Code CLI. Decision pass gửi role prompt, task/context được cấp
+và kết quả Work pass sang `langchain_openai.ChatOpenAI`, gọi bất đồng bộ bằng
+`ainvoke()`. Cả `streaming=False` và `disable_streaming=True` được đặt để tắt stream,
+kể cả khi LangGraph có callback streaming. Tag `nostream` ngăn phản hồi Decision
+phát ra qua luồng `messages` của LangGraph. Decision dùng Chat Completions với
+`response_format=json_schema` (`strict=False`); endpoint nội bộ cần hỗ trợ chế độ
+này. Runtime vẫn kiểm tra `TaskGraphOutput`, danh tính source và quyền giao task.
+
+Đặt `DECISION_BASE_URL`, `DECISION_API_KEY`, `DECISION_MODEL` để dùng LLM nội bộ
+riêng; từng biến bỏ trống sẽ dùng giá trị `QWEN_*` tương ứng. Timeout Decision mặc
+định 120 giây qua `DECISION_TIMEOUT_SECONDS`. SDK không tự retry; lỗi đi qua retry
+kỹ thuật hiện có. Cả hai pass dùng chung giới hạn phiên của runtime.
 
 Skills của từng Work pass được khai báo trong [config/work_pass_skills.json](config/work_pass_skills.json).
 Mặc định `ANALYZE` dùng `gitlab-cli`; các role khác có danh sách rỗng. Thêm skill
@@ -114,10 +127,12 @@ quyền truy cập GitLab còn phụ thuộc token được cấp.
 | `ORCHESTRATOR_TOKEN` | Token nội bộ cho Store/graph SDK; không phát cho browser |
 | `DASHBOARD_TOKEN` | Token riêng cho API giao diện |
 | `QWEN_BASE_URL`, `QWEN_API_KEY`, `QWEN_MODEL` | Endpoint/model OpenAI-compatible cho Qwen Code |
+| `DECISION_BASE_URL`, `DECISION_API_KEY`, `DECISION_MODEL` | LLM nội bộ cho Decision; từng giá trị mặc định theo `QWEN_*` |
+| `DECISION_TIMEOUT_SECONDS` | Timeout Decision LLM; mặc định 120 giây |
 | `WORK_PASS_SKILLS_CONFIG` | Đường dẫn config skills riêng; bỏ trống để dùng config đi kèm |
 | `GITLAB_HOST`, `GITLAB_TOKEN` | Host/token GitLab cho Work pass được gán skill `gitlab-cli` |
 | `MAX_EXECUTE_WORKERS` | 1–5 Execute workers |
-| `MAX_QWEN_SESSIONS` | 1–5 phiên Qwen đồng thời trên Agent Server |
+| `MAX_QWEN_SESSIONS` | 1–5 lượt xử lý đồng thời; mỗi lượt giữ slot qua Work và Decision |
 | `MAX_BACKWARD_DELEGATIONS` | Tối đa 3 lần quay ngược trên execution chain |
 | `MAX_TECHNICAL_RETRIES` | Retry kỹ thuật riêng; mặc định 3 |
 | `HUMAN_RESPONSE_TIMEOUT_SECONDS` | Thời gian chờ human của Communicator; mặc định 1800 giây |

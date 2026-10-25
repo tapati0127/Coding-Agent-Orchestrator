@@ -1,4 +1,4 @@
-"""Bounded, asynchronous two-pass Qwen Code 0.26.1 adapter.
+"""Bounded Qwen Code work pass followed by an async LangChain decision.
 
 Only this trusted runtime maps QWEN_* to the pinned CLI's OPENAI_* interface.
 The semaphore is shared by all graph invocations in one Agent Server process.
@@ -22,6 +22,7 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from .context_scope import CONVERSATION_READERS, identifier
+from .decision import DecisionRunner
 from orchestrator.schemas.delegation import InvalidDelegation, decision_schema, validate_delegation
 from .skills import SKILL_SECRET_ENVIRONMENT, load_work_skills
 
@@ -30,8 +31,8 @@ _POOLS: dict[str, tuple[int, threading.BoundedSemaphore]] = {}
 _POOLS_LOCK = threading.Lock()
 _SECRET_KEYS = ("api_key", "apikey", "token", "password", "credential", "secret")
 # --safe-mode does not enforce --core-tools as an allowlist in 0.26.1. Remove
-# the built-ins explicitly, including deferred tool discovery, in pass 2.
-_DECISION_EXCLUSIONS = (
+# the built-ins explicitly for Communicator's conversation-only work pass.
+_CONVERSATION_EXCLUSIONS = (
     "agent", "edit", "glob", "grep_search", "notebook_edit", "read_file",
     "run_shell_command", "skill", "tool_call", "tool_search", "write_file",
     "list_directory", "read_many_files", "web_fetch", "web_search", "ask_user_question",
@@ -109,6 +110,7 @@ class QwenRunner:
         self.timeout = float(timeout if timeout is not None else os.getenv("QWEN_TIMEOUT_SECONDS", "600"))
         self.data_root = Path(data_root or os.getenv("DATA_ROOT", "/data"))
         self.skills_config = skills_config
+        self.decision = DecisionRunner(base_url=self.base_url, api_key=self.api_key, model=self.model)
         if not 1 <= self.max_sessions <= 5 or self.timeout <= 0:
             raise ValueError("Qwen sessions must be 1–5 and timeout positive")
         self.last_run: dict = {}
@@ -121,7 +123,7 @@ class QwenRunner:
             raise QwenError("QWEN_BASE_URL must be an HTTP(S) endpoint without embedded credentials")
 
     def _redact(self, text: str) -> str:
-        for secret in (self.api_key, *(os.getenv(key, "") for key in SKILL_SECRET_ENVIRONMENT)):
+        for secret in (self.api_key, self.decision.api_key, *(os.getenv(key, "") for key in SKILL_SECRET_ENVIRONMENT)):
             if secret:
                 text = text.replace(secret, "[REDACTED]")
         return text
@@ -169,6 +171,7 @@ class QwenRunner:
         from orchestrator.schemas.task_graph import TaskGraphOutput
 
         self._validate_config()
+        self.decision.validate_config()
         agent = str(task.get("agent", task.get("producer_agent", ""))).upper()
         if agent not in {"COMMUNICATOR", "ANALYZE", "PLAN_DELEGATE", "EXECUTE", "VERIFY_INTEGRATE", "FINALIZE"}:
             raise QwenError("Unknown Qwen agent")
@@ -179,8 +182,9 @@ class QwenRunner:
         task_id = identifier(task["task_id"])
         run_id = uuid.uuid4().hex
         run_dir = self.data_root / "private" / project / agent / task_id / run_id
-        cwd_path, role_prompt, schema_path, pool_scope = await asyncio.to_thread(
-            self._prepare_run, run_dir, cwd, agent, json.dumps(decision_schema(agent)))
+        schema = decision_schema(agent)
+        cwd_path, role_prompt, _, pool_scope = await asyncio.to_thread(
+            self._prepare_run, run_dir, cwd, agent, json.dumps(schema))
         skills = await asyncio.to_thread(load_work_skills, agent, self.skills_config)
         payload = self._redact(json.dumps(_safe_payload({"task": task, "context": context}), ensure_ascii=False, default=str))
         work_prompt = self._redact(role_prompt + "\nWORK PASS SKILLS:\n" + skills.instructions
@@ -223,16 +227,13 @@ class QwenRunner:
             prompt = decision_prompt
             for attempt in range(attempts):
                 phase = "decision" if attempt == 0 else f"decision-repair-{attempt}"
-                decision = await self._invoke(prompt, cwd_path, run_dir, phase, schema_path, on_log)
-                output = decision.get("structured_result")
-                if not isinstance(output, dict):
-                    raise QwenError("Qwen decision completed without structured_result")
+                output = await self._invoke_decision(prompt, schema, run_dir, phase, on_log)
                 graph = TaskGraphOutput.model_validate(output)
                 validated = graph.model_dump(mode="json", by_alias=True)
                 expected = {"project_id": project, "source_task_id": task_id, "producer_agent": agent,
                             "execution_chain_id": task["execution_chain_id"]}
                 if any(validated.get(key) != value for key, value in expected.items()):
-                    raise QwenError("Qwen decision source identity does not match the claimed task")
+                    raise QwenError("Decision source identity does not match the claimed task")
                 try:
                     validate_delegation(graph)
                 except InvalidDelegation as exc:
@@ -248,21 +249,39 @@ class QwenRunner:
                 else:
                     return validated
 
+    async def _invoke_decision(self, prompt: str, schema: dict, run_dir: Path,
+                               phase: str, on_log: Callable | None) -> dict:
+        output = await self.decision.ainvoke(prompt, schema)
+        output = json.loads(self._redact(json.dumps(output, ensure_ascii=False)))
+        log_path = run_dir / f"{phase}.jsonl"
+        entry = {"phase": phase, "channel": "llm", "line": json.dumps(output, ensure_ascii=False)}
+
+        def write_result():
+            descriptor = os.open(log_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, stat.S_IRUSR | stat.S_IWUSR)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as log:
+                log.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+        await asyncio.to_thread(write_result)
+        self.last_run["passes"].append({"phase": phase, "log_path": str(log_path),
+                                       "transport": "langchain_openai", "model": self.decision.model})
+        if on_log:
+            call = on_log({"phase": phase, "channel": "llm", "line": "Decision response received"})
+            if inspect.isawaitable(call):
+                await call
+        return output
+
     async def _invoke(
         self, prompt: str, cwd: Path, run_dir: Path, phase: str,
-        schema: Path | None = None, on_log: Callable | None = None,
+        on_log: Callable | None = None,
         conversation_only: bool = False,
         skill_environment: tuple[str, ...] = (),
     ) -> dict:
         args = [self.executable, "--prompt", prompt, "--output-format", "stream-json", "--safe-mode", "--auth-type", "openai",
                 "--approval-mode", "yolo", "--max-session-turns", "50", "--exclude-tools"]
-        args += list(_DECISION_EXCLUSIONS) if schema is not None or conversation_only else ["agent"]
-        if schema is not None:
-            # No file/shell tools in the decision pass. structured_output bypasses core-tools.
-            args += ["--json-schema", "@" + str(schema), "--core-tools", "structured_output"]
+        args += list(_CONVERSATION_EXCLUSIONS) if conversation_only else ["agent"]
         log_path = run_dir / f"{phase}.jsonl"
         child_env = await asyncio.to_thread(self._prepare_invocation, log_path, run_dir / "home" / phase,
-                                           skill_environment if schema is None else ())
+                                           skill_environment)
         result: dict | None = None
         total_bytes = 0
         proc = None

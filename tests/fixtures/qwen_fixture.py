@@ -28,55 +28,23 @@ def main():
         assert "Messages" not in context
     if agent == "COMMUNICATOR":
         assert not Path(".git").exists()
-    if "--json-schema" not in sys.argv:
-        emit({"type": "assistant", "fixture_phase": "start", "at": time.time(), "message": "fixture work"})
-        if agent == "EXECUTE":
-            name = "api" if task["title"] == "Implement API" else "ui"
-            # The intervals recorded in private logs prove these work passes
-            # overlapped; an open port or two allocated tasks is insufficient.
-            # Agent Server's background worker polling can stagger starts by a
-            # second. Leave enough work to observe overlap despite that cadence.
-            time.sleep(3)
-            Path(f"{name}.txt").write_text(f"{name} implemented\n")
-        elif agent in {"VERIFY_INTEGRATE", "FINALIZE"}:
-            assert Path("api.txt").read_text() == "api implemented\n"
-            assert Path("ui.txt").read_text() == "ui implemented\n"
-        emit({"type": "result", "subtype": "success", "is_error": False,
-              "session_id": f"fixture-{agent}-work", "result": "Fixture work passed",
-              "fixture_phase": "end", "at": time.time()})
-        return
-    output = {
-        "schema_version": "1.0", "project_id": task["project_id"],
-        "source_task_id": task["task_id"], "producer_agent": agent,
-        "execution_chain_id": task["execution_chain_id"],
-        "summary": "Deterministic fixture acceptance passed",
-        "source_result": {"outcome": "SUCCESS", "proposed_status": "DONE"},
-        "nodes": [], "edges": [],
-    }
-    if agent == "COMMUNICATOR":
-        output["nodes"] = [{"id": "analyze", "target_agent": "ANALYZE", "title": "Analyze fixture request", "description": "Build independent API and UI, then integrate and accept both."}]
-    elif agent == "ANALYZE":
-        output["nodes"] = [{"id": "plan", "target_agent": "PLAN_DELEGATE", "title": "Plan fixture feature"}]
-    elif agent == "PLAN_DELEGATE":
-        output["nodes"] = [
-            {"id": "api", "target_agent": "EXECUTE", "title": "Implement API", "acceptance_criteria": ["api.txt contains implementation"]},
-            {"id": "ui", "target_agent": "EXECUTE", "title": "Implement UI", "acceptance_criteria": ["ui.txt contains implementation"]},
-            {"id": "verify", "target_agent": "VERIFY_INTEGRATE", "title": "Integrate and verify both changes"},
-            {"id": "finalize", "target_agent": "FINALIZE", "title": "Accept complete fixture feature"},
-        ]
-        output["edges"] = [
-            {"from": "api", "to": "verify", "type": "DEPENDS_ON", "condition": "SUCCESS"},
-            {"from": "ui", "to": "verify", "type": "DEPENDS_ON", "condition": "SUCCESS"},
-            {"from": "verify", "to": "finalize", "type": "DEPENDS_ON", "condition": "SUCCESS"},
-        ]
-    elif agent == "FINALIZE":
-        output["source_result"].update(
-            proposed_status="CLOSED", close_task_ids=[t["task_id"] for t in context["chain_tasks"]]
-        )
-        output["notification"] = {"message": "Fixture feature verified and finalized"}
+    assert "--json-schema" not in sys.argv, "Decision must use LangChain, not CLI"
+    emit({"type": "assistant", "fixture_phase": "start", "at": time.time(), "message": "fixture work"})
+    if agent == "EXECUTE":
+        name = "api" if task["title"] == "Implement API" else "ui"
+        # The intervals recorded in private logs prove these work passes
+        # overlapped; an open port or two allocated tasks is insufficient.
+        # Agent Server's background worker polling can stagger starts by a
+        # second. Leave enough work to observe overlap despite that cadence.
+        time.sleep(3)
+        Path(f"{name}.txt").write_text(f"{name} implemented\n")
+    elif agent in {"VERIFY_INTEGRATE", "FINALIZE"}:
+        assert Path("api.txt").read_text() == "api implemented\n"
+        assert Path("ui.txt").read_text() == "ui implemented\n"
     emit({"type": "result", "subtype": "success", "is_error": False,
-          "session_id": f"fixture-{agent}-decision", "result": "Graph decision",
-          "structured_result": output})
+          "session_id": f"fixture-{agent}-work", "result": "Fixture work passed",
+          "fixture_phase": "end", "at": time.time()})
+    return
 
 
 if __name__ == "__main__":

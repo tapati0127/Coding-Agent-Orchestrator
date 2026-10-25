@@ -9,6 +9,7 @@ import pytest
 
 from orchestrator.runtime.context_scope import ScopedContext
 from orchestrator.runtime.qwen import QwenError, QwenRunner
+from orchestrator.runtime.decision import DecisionRunner
 
 
 def source_task(agent="EXECUTE"):
@@ -21,6 +22,28 @@ def result_graph():
         "producer_agent": "EXECUTE", "execution_chain_id": "chain1", "summary": "done",
         "source_result": {"outcome": "SUCCESS", "proposed_status": "DONE"}, "nodes": [], "edges": [],
     }
+
+
+@pytest.fixture(autouse=True)
+def decision_spy(monkeypatch, request):
+    """Mock the network boundary only; runtime validation/logging still run."""
+    state = {"calls": [], "outputs": []}
+
+    async def ainvoke(self, prompt, schema):
+        state["calls"].append((prompt, schema))
+        assert "<work-skill" not in prompt
+        assert "ROLE_SPECIFIC_SKILL_MARKER" not in prompt
+        assert "glpat-fixture-private-value" not in prompt
+        payload = next(json.loads(line) for line in prompt.splitlines() if line.startswith('{"task":'))
+        if payload["task"]["agent"] not in {"COMMUNICATOR", "ANALYZE", "FINALIZE"}:
+            assert "PRIVATE_HISTORY_MARKER" not in prompt
+        if state["outputs"]:
+            return state["outputs"].pop(0)
+        return {**result_graph(), "producer_agent": payload["task"]["agent"]}
+
+    if request.node.name != "test_pinned_actual_cli_and_langchain_openai_protocol":
+        monkeypatch.setattr(DecisionRunner, "ainvoke", ainvoke)
+    return state
 
 
 def fake_cli(tmp_path: Path, body: str) -> Path:
@@ -44,15 +67,8 @@ assert 'LANGSMITH_API_KEY' not in os.environ
 assert 'ORCHESTRATOR_TOKEN' not in os.environ
 assert '--safe-mode' in sys.argv and '--auth-type' in sys.argv
 print(json.dumps({'type':'assistant','text':os.environ['OPENAI_API_KEY']}), flush=True)
-if '--json-schema' in sys.argv:
-    schema_arg = sys.argv[sys.argv.index('--json-schema')+1]
-    schema = json.load(open(schema_arg[1:]))
-    assert schema['type'] == 'object'
-    assert '--core-tools' in sys.argv
-    print(json.dumps({'type':'result','subtype':'success','result':'decision',
-        'structured_result': ''' + repr(result_graph()) + '''}))
-else:
-    print(json.dumps({'type':'result','subtype':'success','result':'implemented and tested'}))
+assert '--json-schema' not in sys.argv
+print(json.dumps({'type':'result','subtype':'success','result':'implemented and tested'}))
 ''')
     monkeypatch.setenv("LANGSMITH_API_KEY", "must-not-propagate")
     monkeypatch.setenv("ORCHESTRATOR_TOKEN", "must-not-propagate")
@@ -78,15 +94,56 @@ async def test_nonzero_exit_is_not_accepted_as_success(tmp_path):
         await runner(tmp_path, executable).run(source_task(), {}, str(tmp_path))
 
 
+async def test_separate_decision_key_is_redacted_and_never_given_to_work(tmp_path, monkeypatch, decision_spy):
+    monkeypatch.setenv("DECISION_API_KEY", "private-decision-key")
+    executable = fake_cli(tmp_path, '''import json, os, sys
+assert 'DECISION_API_KEY' not in os.environ
+assert os.environ['OPENAI_API_KEY'] == 'sensitive-key-value-12345'
+assert 'private-decision-key' not in sys.argv[sys.argv.index('--prompt') + 1]
+print(json.dumps({'type':'result','result':'Evidence collected'}))
+''')
+    decision_spy["outputs"] = [{**result_graph(), "summary": "private-decision-key"}]
+    qwen = runner(tmp_path, executable)
+    events = []
+    result = await qwen.run(source_task(), {"shared": "private-decision-key"}, str(tmp_path), events.append)
+    assert result["summary"] == "[REDACTED]"
+    assert "private-decision-key" not in decision_spy["calls"][0][0]
+    logs = "".join(path.read_text() for path in Path(qwen.last_run["private_log_dir"]).glob("*.jsonl"))
+    assert "private-decision-key" not in logs
+    assert [event["line"] for event in events if event["phase"] == "decision"] == ["Decision response received"]
+
+
+async def test_decision_failure_releases_shared_slot(tmp_path, monkeypatch):
+    async def work(self, *args, **kwargs):
+        return {"result": "Evidence collected"}
+
+    async def timeout(self, *args):
+        raise TimeoutError()
+
+    monkeypatch.setattr(QwenRunner, "_invoke", work)
+    monkeypatch.setattr(DecisionRunner, "ainvoke", timeout)
+    qwen = runner(tmp_path, "unused", max_sessions=1)
+    with pytest.raises(TimeoutError):
+        await qwen.run(source_task(), {}, str(tmp_path))
+
+    async def success(self, *args):
+        return result_graph()
+
+    monkeypatch.setattr(DecisionRunner, "ainvoke", success)
+    result = await asyncio.wait_for(qwen.run(source_task(), {}, str(tmp_path)), timeout=2)
+    assert result["source_result"]["outcome"] == "SUCCESS"
+
+
 async def test_timeout_kills_child_and_releases_global_slot(tmp_path):
     executable = fake_cli(tmp_path, "import time\ntime.sleep(60)\n")
     with pytest.raises(TimeoutError):
         await runner(tmp_path, executable, timeout=0.1).run(source_task(), {}, str(tmp_path))
 
 
-async def test_rejects_decision_source_spoofing(tmp_path):
+async def test_rejects_decision_source_spoofing(tmp_path, decision_spy):
     graph = result_graph()
     graph["source_task_id"] = "other-task"
+    decision_spy["outputs"] = [graph]
     executable = fake_cli(tmp_path, "import json\nprint(json.dumps({'type':'result', 'result':'ok', 'structured_result':" + repr(graph) + "}))\n")
     with pytest.raises(QwenError, match="identity"):
         await runner(tmp_path, executable).run(source_task(), {}, str(tmp_path))
@@ -123,6 +180,10 @@ async def test_shared_global_session_limit_across_runner_instances(tmp_path, mon
         active -= 1
         return {"result": "ok", "structured_result": result_graph()}
 
+    async def decide(self, *args):
+        return (await invoke(self))["structured_result"]
+
+    monkeypatch.setattr(DecisionRunner, "ainvoke", decide)
     monkeypatch.setattr(QwenRunner, "_invoke", invoke)
     runners = [runner(tmp_path, "unused", max_sessions=2) for _ in range(8)]
     await asyncio.gather(*(q.run(source_task(), {}, str(tmp_path)) for q in runners))
@@ -152,6 +213,10 @@ async def test_session_limit_shared_across_threads_with_separate_event_loops(tmp
         qwen = runner(tmp_path, "unused", max_sessions=2)
         return asyncio.run(qwen.run(source_task(), {}, str(tmp_path)))
 
+    async def decide(self, *args):
+        return (await invoke(self))["structured_result"]
+
+    monkeypatch.setattr(DecisionRunner, "ainvoke", decide)
     monkeypatch.setattr(QwenRunner, "_invoke", invoke)
     outputs = await asyncio.gather(*(asyncio.to_thread(run_in_thread) for _ in range(8)))
     assert len(outputs) == 8
@@ -245,13 +310,8 @@ async def test_execute_requires_trusted_owner_and_private_artifacts_are_not_reso
 
 
 @pytest.mark.skipif(os.getenv("RUN_QWEN_CLI_TESTS") != "1", reason="requires installed pinned Qwen CLI; opt in with RUN_QWEN_CLI_TESTS=1")
-async def test_pinned_actual_cli_two_pass_openai_protocol_and_decision_tools(tmp_path):
-    """Exercise the real CLI against a deterministic HTTP protocol fixture.
-
-    This verifies CLI/provider/schema integration, not a model's coding ability.
-    In 0.26.1 safe mode does not enforce the core-tools allowlist; checking the
-    actual outgoing request guards against silently exposing tools in pass 2.
-    """
+async def test_pinned_actual_cli_and_langchain_openai_protocol(tmp_path):
+    """Exercise actual Qwen work and LangChain Decision HTTP protocols."""
     requests = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -261,14 +321,20 @@ async def test_pinned_actual_cli_two_pass_openai_protocol_and_decision_tools(tmp
         def do_POST(self):
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             requests.append(request)
-            tools = [tool.get("function", {}).get("name") for tool in request.get("tools", [])]
-            if "structured_output" in tools:
-                delta = {"role": "assistant", "tool_calls": [{"index": 0, "id": "decision_1", "type": "function",
-                         "function": {"name": "structured_output", "arguments": json.dumps(result_graph())}}]}
-                finish = "tool_calls"
-            else:
-                delta = {"role": "assistant", "content": "Protocol fixture completed; no model coding performed."}
-                finish = "stop"
+            if not request.get("stream"):
+                assert request["response_format"]["type"] == "json_schema"
+                assert "tools" not in request
+                data = json.dumps({"id": "fixture", "object": "chat.completion", "created": 1,
+                    "model": "fixture", "choices": [{"index": 0, "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": json.dumps(result_graph())}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            delta = {"role": "assistant", "content": "Protocol fixture completed; no model coding performed."}
+            finish = "stop"
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
@@ -291,14 +357,16 @@ async def test_pinned_actual_cli_two_pass_openai_protocol_and_decision_tools(tmp
         assert output["source_result"]["outcome"] == "SUCCESS"
         assert len(requests) == 2
         assert "structured_output" not in [t["function"]["name"] for t in requests[0].get("tools", [])]
-        assert [t["function"]["name"] for t in requests[1].get("tools", [])] == ["structured_output"]
+        assert requests[1]["stream"] is False
+        assert requests[1]["response_format"]["type"] == "json_schema"
+        assert "tools" not in requests[1]
     finally:
         await asyncio.to_thread(server.shutdown)
         server.server_close()
         thread.join(timeout=2)
 
 
-async def test_communicator_two_passes_use_own_prompt_and_exclude_code_tools(tmp_path):
+async def test_communicator_two_passes_use_own_prompt_and_exclude_code_tools(tmp_path, decision_spy):
     output = result_graph()
     output.update(producer_agent="COMMUNICATOR", nodes=[{
         "id": "analyze", "target_agent": "ANALYZE", "title": "Analyze clarified request"}])
@@ -308,17 +376,18 @@ assert "the user's representative" in prompt
 assert 'PRIVATE_HISTORY_MARKER' in prompt
 for tool in ['read_file', 'run_shell_command', 'edit', 'write_file', 'agent', 'web_fetch']:
     assert tool in sys.argv
-if '--json-schema' in sys.argv:
-    print(json.dumps({'type': 'result', 'result': 'decision', 'structured_result': ''' + repr(output) + '''}))
-else:
-    print(json.dumps({'type': 'result', 'result': 'The user wants a customer portal.'}))
+assert '--json-schema' not in sys.argv
+print(json.dumps({'type': 'result', 'result': 'The user wants a customer portal.'}))
 ''')
+    decision_spy["outputs"] = [output]
     qwen = runner(tmp_path, executable)
     result = await qwen.run(source_task("COMMUNICATOR"), {
         "Messages": [{"type": "human", "data": {"content": "PRIVATE_HISTORY_MARKER"}}],
         "delegation": {"backward_count": 0, "max_backward_delegations": 3},
     }, str(tmp_path))
     assert result["nodes"][0]["target_agent"] == "ANALYZE"
+    assert "the user's representative" in decision_spy["calls"][0][0]
+    assert "PRIVATE_HISTORY_MARKER" in decision_spy["calls"][0][0]
     assert [p["phase"] for p in qwen.last_run["passes"]] == ["work", "decision"]
 
 
@@ -333,53 +402,47 @@ print(json.dumps({'type':'result', 'result':'ok', 'structured_result': ''' + rep
 
 
 @pytest.mark.parametrize("target,outcome", [("COMMUNICATOR", "NEED_ANALYSIS"), ("PLAN_DELEGATE", "SUCCESS")])
-async def test_analyze_repairs_wrong_route_without_repeating_work(tmp_path, target, outcome):
+async def test_analyze_repairs_wrong_route_without_repeating_work(tmp_path, target, outcome, decision_spy):
     invalid = {**result_graph(), "producer_agent": "ANALYZE", "nodes": [
         {"id": "next", "target_agent": "EXECUTE", "title": "Implement immediately"}]}
     corrected = {**invalid, "source_result": {"outcome": outcome}, "nodes": [
         {"id": "next", "target_agent": target, "title": "Clarify or plan the brief", "reason": "Resolve scope before implementation"}]}
-    executable = fake_cli(tmp_path, '''import json, sys
+    decision_spy["outputs"] = [invalid, corrected]
+    executable = fake_cli(tmp_path, """import json, sys
 from pathlib import Path
-prompt = sys.argv[sys.argv.index('--prompt') + 1]
-if '--json-schema' not in sys.argv:
-    count = Path('work-count')
-    assert not count.exists(), 'Work pass must not be repeated'
-    count.write_text('1')
-    print(json.dumps({'type': 'result', 'result': 'WORK_RESULT_SENTINEL'}))
-else:
-    schema = json.load(open(sys.argv[sys.argv.index('--json-schema')+1][1:]))
-    assert schema['$defs']['GraphNode']['properties']['target_agent']['enum'] == ['COMMUNICATOR', 'PLAN_DELEGATE']
-    assert 'ANALYZE' in schema['$defs']['Agent']['enum']
-    counter = Path('decision-count')
-    attempt = int(counter.read_text()) + 1 if counter.exists() else 1
-    counter.write_text(str(attempt))
-    output = ''' + repr(invalid) + '''
-    if attempt == 2:
-        assert 'DELEGATION CORRECTION REQUIRED' in prompt
-        assert 'WORK_RESULT_SENTINEL' in prompt
-        assert 'Do not merely rename' in prompt
-        output = ''' + repr(corrected) + '''
-    print(json.dumps({'type': 'result', 'result': 'decision', 'structured_result': output}))
-''')
+assert '--json-schema' not in sys.argv
+count = Path('work-count')
+assert not count.exists(), 'Work pass must not be repeated'
+count.write_text('1')
+print(json.dumps({'type': 'result', 'result': 'WORK_RESULT_SENTINEL'}))
+""")
     qwen = runner(tmp_path, executable)
     result = await qwen.run(source_task("ANALYZE"), {}, str(tmp_path))
     assert result["nodes"][0]["target_agent"] == target
     assert result["source_result"]["outcome"] == outcome
     assert [p["phase"] for p in qwen.last_run["passes"]] == ["work", "decision", "decision-repair-1"]
     assert (tmp_path / "work-count").read_text() == "1"
-    assert (tmp_path / "decision-count").read_text() == "2"
+    assert len(decision_spy["calls"]) == 2
+    prompt, schema = decision_spy["calls"][1]
+    assert "DELEGATION CORRECTION REQUIRED" in prompt
+    assert "WORK_RESULT_SENTINEL" in prompt
+    assert "Do not merely rename" in prompt
+    assert schema["$defs"]["GraphNode"]["properties"]["target_agent"]["enum"] == ["COMMUNICATOR", "PLAN_DELEGATE"]
+    assert "ANALYZE" in schema["$defs"]["Agent"]["enum"]
 
 
-async def test_analyze_invalid_route_repairs_are_bounded_and_release_slot(tmp_path):
+async def test_analyze_invalid_route_repairs_are_bounded_and_release_slot(tmp_path, decision_spy):
     invalid = {**result_graph(), "producer_agent": "ANALYZE", "nodes": [
         {"id": "next", "target_agent": "FINALIZE", "title": "Skip planning"}]}
     executable = fake_cli(tmp_path, "import json\nprint(json.dumps({'type':'result', 'result':'ok', 'structured_result':" + repr(invalid) + "}))\n")
     qwen = runner(tmp_path, executable, max_sessions=1)
+    decision_spy["outputs"] = [invalid, invalid]
     with pytest.raises(QwenError, match="after 2 decision attempts"):
         await qwen.run({**source_task("ANALYZE"), "max_attempts": 2}, {}, str(tmp_path))
     assert [p["phase"] for p in qwen.last_run["passes"]] == ["work", "decision", "decision-repair-1"]
     valid = {**invalid, "nodes": [{"id": "plan", "target_agent": "PLAN_DELEGATE", "title": "Plan the work"}]}
     fake_cli(tmp_path, "import json\nprint(json.dumps({'type':'result', 'result':'ok', 'structured_result':" + repr(valid) + "}))\n")
+    decision_spy["outputs"] = [valid]
     result = await asyncio.wait_for(qwen.run(source_task("ANALYZE"), {}, str(tmp_path)), timeout=5)
     assert result["nodes"][0]["target_agent"] == "PLAN_DELEGATE"
 

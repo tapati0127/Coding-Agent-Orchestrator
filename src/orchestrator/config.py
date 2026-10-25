@@ -13,6 +13,10 @@ class Settings:
     qwen_base_url: str = "http://llm.internal/v1"
     qwen_api_key: str = field(default="", repr=False)
     qwen_model: str = "qwen-coder"
+    decision_base_url: str = ""
+    decision_api_key: str = field(default="", repr=False)
+    decision_model: str = ""
+    decision_timeout_seconds: int = 120
     orchestrator_token: str = field(default="", repr=False)
     dashboard_token: str = field(default="", repr=False)
     max_execute_workers: int = 5
@@ -34,7 +38,8 @@ class Settings:
             if not minimum <= value <= upper:
                 raise ValueError(f"{name} must be between {minimum} and {upper}")
         if (self.dispatch_poll_seconds <= 0 or self.task_lease_seconds <= 0
-                or self.qwen_timeout_seconds <= 0 or self.human_response_timeout_seconds <= 0):
+                or self.qwen_timeout_seconds <= 0 or self.human_response_timeout_seconds <= 0
+                or self.decision_timeout_seconds <= 0):
             raise ValueError("Polling, lease and timeout durations must be positive")
         if self.orchestrator_token and self.orchestrator_token == self.dashboard_token:
             raise ValueError("ORCHESTRATOR_TOKEN and DASHBOARD_TOKEN must be different")
@@ -49,6 +54,7 @@ class Settings:
             "dispatch_poll_seconds": float, "task_lease_seconds": int,
             "qwen_timeout_seconds": int, "workspace_root": Path, "data_root": Path,
             "human_response_timeout_seconds": int,
+            "decision_timeout_seconds": int,
         }
         for name in cls.__dataclass_fields__:
             key = name.upper()

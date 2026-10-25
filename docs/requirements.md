@@ -36,16 +36,16 @@
 
 ## 3. Vòng đời xử lý trong mỗi agent
 
-Đối với **Agent 0–5**, mỗi lượt xử lý task có ít nhất hai lần gọi Qwen Code:
+Đối với **Agent 0–5**, mỗi lượt xử lý task có hai pass:
 
 1. **Pass 1 — Work:** chạy Qwen Code để thực hiện nhiệm vụ chuyên biệt. Plan tạo kế hoạch **bằng ngôn ngữ tự nhiên**; Execute viết/chạy code; Verify thực hiện review/kiểm tra; v.v. Ghi log, kết quả và references đến artifacts.
-2. **Pass 2 — Graph decision:** gọi Qwen Code để đọc kết quả Pass 1 và sinh **chỉ một `TaskGraphOutput` hợp lệ theo JSON Schema chung**; kể cả không có task mới, vẫn trả graph rỗng cùng outcome và source-task result.
+2. **Pass 2 — Graph decision:** gọi LangChain `ChatOpenAI.ainvoke()` bất đồng bộ, tắt streaming (`streaming=False`, `disable_streaming=True`, tag `nostream`), để đọc kết quả Pass 1 và sinh **chỉ một `TaskGraphOutput` hợp lệ theo JSON Schema chung**; kể cả không có task mới, vẫn trả graph rỗng cùng outcome và source-task result.
 3. Worker ghi output vào **request inbox** của Store. **Task Dispatcher** kiểm tra protocol, quyền, dependencies, transitions, backward budget, idempotency và chỉ sau đó mới ghi graph/task chính thức.
 4. Worker không tự đặt `DONE`/`CLOSED`, không trực tiếp tạo task hợp lệ và không tự nâng quyền/khai báo task đã được phê duyệt.
 
 Communicator gọi Qwen với prompt riêng. API tạo request intake, Dispatcher mở task Communicator. Agent chọn tự giao, hỏi human hoặc giao Analyze; người dùng không cần tương tác trực tiếp với Store.
 
-Các Qwen Code session cần stream log; lượt quyết định dùng `--json-schema` với headless mode. Không giả định một invocation Qwen Code nhất thiết phải vừa streaming thay đổi code vừa trả structured output: đây là hai pass tách biệt.
+Các Qwen Code Work session stream log private; lượt Decision dùng Chat Completions JSON Schema, không gọi CLI hoặc stream token. Cấu hình endpoint/model/API key nội bộ riêng bằng `DECISION_BASE_URL`, `DECISION_MODEL`, `DECISION_API_KEY`; từng biến bỏ trống kế thừa `QWEN_*` tương ứng. Timeout qua `DECISION_TIMEOUT_SECONDS` (mặc định 120 giây). Runtime vẫn kiểm tra schema, danh tính source và hướng giao task trước khi gửi Dispatcher.
 
 ## 4. Một protocol structured output duy nhất: `TaskGraphOutput`
 
@@ -269,6 +269,10 @@ LANGGRAPH_URL=http://127.0.0.1:2024
 QWEN_BASE_URL=http://llm.internal/v1
 QWEN_API_KEY=change-me
 QWEN_MODEL=qwen-coder
+DECISION_BASE_URL=
+DECISION_API_KEY=
+DECISION_MODEL=
+DECISION_TIMEOUT_SECONDS=120
 MAX_EXECUTE_WORKERS=5
 MAX_QWEN_SESSIONS=5
 MAX_BACKWARD_DELEGATIONS=3

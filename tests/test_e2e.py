@@ -22,6 +22,8 @@ from uuid import uuid4
 import httpx
 import pytest
 
+from fixtures.decision_fixture import decision_endpoint
+
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_SERVER_TESTS") != "1",
@@ -89,7 +91,8 @@ def supervisor(cwd, environment, logfile):
                     pass
 
 
-def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path):
+def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path, decision_endpoint):
+    decision_env, decision_requests = decision_endpoint
     with socket.socket() as probe:
         if probe.connect_ex(("127.0.0.1", 2024)) == 0:
             pytest.skip("Local port 2024 is already in use; no existing service was stopped")
@@ -112,6 +115,7 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
     internal_token, dashboard_token = uuid4().hex, uuid4().hex
     environment = {
         **os.environ,
+        **decision_env,
         "PATH": f"{Path(sys.executable).parent}:{os.environ.get('PATH', '')}",
         "LANGGRAPH_URL": URL, "ORCHESTRATOR_TOKEN": internal_token,
         "DASHBOARD_TOKEN": dashboard_token, "QWEN_CODE_BIN": str(fixture),
@@ -153,6 +157,7 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             snapshot = wait_for(completed, timeout=60, description="all seven tasks CLOSED",
                                 process=process, logfile=first_log)
             tasks = snapshot["tasks"]
+            assert len(decision_requests) == 7
             execute = [task for task in tasks if task["agent"] == "EXECUTE"]
             assert len({task["assigned_worker"] for task in execute}) == 2
             assert all(task["integrated"] and task["commit_sha"] for task in execute)
@@ -201,3 +206,4 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             assert (integration / "ui.txt").read_text() == "ui implemented\n"
             assert all(path.read_bytes() == content for path, content in preserved_patches.items())
         assert restarted.returncode == 0, restart_log.read_text()[-6000:]
+        assert len(decision_requests) == 7
