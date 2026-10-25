@@ -8,7 +8,7 @@ from typing import Annotated
 from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from langgraph.config import get_stream_writer
+from langgraph.runtime import Runtime
 
 from orchestrator.graphs.common import AgentState
 from orchestrator.runtime.decision import DecisionRunner, safe_payload
@@ -30,7 +30,7 @@ def _role_prompt() -> str:
     return files("orchestrator").joinpath("prompts", "communicator.md").read_text(encoding="utf-8")
 
 
-async def communicate(state: CommunicatorState) -> dict:
+async def communicate(state: CommunicatorState, runtime: Runtime) -> dict:
     task = state.get("task")
     if task is not None and task.get("agent") != "COMMUNICATOR":
         raise ValueError("Communicator cannot run a task assigned to another agent")
@@ -38,15 +38,12 @@ async def communicate(state: CommunicatorState) -> dict:
     if not any(isinstance(message, HumanMessage) for message in history):
         raise ValueError("Communicator requires a user message in messages")
     messages = [SystemMessage(content=await asyncio.to_thread(_role_prompt)), *history]
-    runtime = DecisionRunner()
-    try:
-        writer = get_stream_writer()
-    except RuntimeError:
-        writer = lambda _: None
+    model = DecisionRunner()
+    writer = runtime.stream_writer
     if task is None:
         if state.get("project_id"):
-            return await follow_progress(state, runtime, messages, writer)
-        reply = await runtime.chat(messages, stream=True)
+            return await follow_progress(state, model, messages, writer, store=runtime.store)
+        reply = await model.chat(messages, stream=True)
         writer({"type": "reply", "id": reply.id, "content": reply.content})
         return {}
 
@@ -55,7 +52,7 @@ async def communicate(state: CommunicatorState) -> dict:
     context = {key: value for key, value in state.get("context", {}).items() if key != "Messages"}
     messages.insert(1, HumanMessage(content="Dispatcher task metadata (input data):\n" + json.dumps(
         safe_payload({"task": task, "context": context}), ensure_ascii=False, default=str)))
-    output = await runtime.ainvoke(messages, decision_schema("COMMUNICATOR"))
+    output = await model.ainvoke(messages, decision_schema("COMMUNICATOR"))
     output = TaskGraphOutput.model_validate(output).model_dump(mode="json", by_alias=True)
     expected = {"project_id": task["project_id"], "source_task_id": task["task_id"],
                 "producer_agent": "COMMUNICATOR", "execution_chain_id": task["execution_chain_id"]}

@@ -65,7 +65,11 @@ LangGraph SDK gọi `runs.stream` với `stream_mode=["messages-tuple", "custom"
 Browser chỉ giữ DASHBOARD_TOKEN trong bộ nhớ; runtime token nằm ở server.
 
 Khi chọn dự án, Communicator gửi yêu cầu vào queue Dispatcher rồi đọc trực tiếp
-task/approval của execution chain từ Store. Chỉ khi trạng thái thay đổi mới gọi
+task/approval của execution chain qua `runtime.store` được LangGraph inject vào
+node `communicate(state, runtime: Runtime)`. Graph dùng API native `aget/asearch`,
+không mở SDK Store client. Agent Server cấp Store khi chạy graph; khi chạy local,
+truyền Store vào `builder.compile(store=store)` để LangGraph đưa xuống subgraph.
+Chỉ khi trạng thái thay đổi mới gọi
 LLM để báo tiến độ; heartbeat không làm phát sinh lời trả lời mới. Theo dõi kết
 thúc khi cả chain CLOSED, cần người dùng trả lời, hoặc không còn task chạy/đợi
 và trạng thái giữ nguyên qua nhiều lần đọc. Chat trả lời câu hỏi làm rõ tiếp tục
@@ -83,7 +87,7 @@ Dispatcher đọc/ghi Store
     → Dispatcher kiểm tra, lưu kết quả và giao task tiếp theo
 ```
 
-**Chỉ Dispatcher ghi Store; Communicator chat đọc Store để báo tiến độ.**
+**Chỉ Dispatcher ghi Store; Communicator chat đọc `runtime.store` để báo tiến độ.**
 Dispatcher dựng context, kiểm tra dependencies,
 claim task và cấp lease trước khi giao việc. Worker không poll Store, không chờ
 receipt và không gọi LangGraph SDK. Worker chờ bằng `queue.get()`, log bắt đầu/kết
@@ -99,6 +103,10 @@ Agent Server chỉ expose Communicator và phục vụ Dashboard. Do nó là pro
 Supervisor mở một `multiprocessing.Manager` bridge trên loopback để Dashboard gửi
 yêu cầu và nhận phản hồi từ Dispatcher. Dashboard cũng không mở Store client.
 Chạy qua Supervisor để có bridge; graph chat `messages` vẫn dùng được riêng.
+
+`SDKStore` chỉ dùng trong process Dispatcher riêng để truy cập cùng Store do
+Agent Server quản lý. Node Communicator dùng Store từ Runtime, không gọi vòng
+qua HTTP Store API.
 
 Chưa triển khai hủy task hoặc trạng thái `CANCEL`.
 

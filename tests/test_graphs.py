@@ -10,6 +10,7 @@ from orchestrator.graphs import communicator as communicator_module
 from orchestrator.graphs.communicator import graph as communicator
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, messages_to_dict
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.runtime import Runtime
 from orchestrator.schemas.task_graph import TaskGraphOutput
 from orchestrator.workers.graph_runner import run_graph
 from orchestrator.workers.main import Worker
@@ -53,7 +54,7 @@ async def test_communicate_rejects_wrong_role_before_llm(monkeypatch):
     runner = Mock(side_effect=AssertionError("Must validate role first"))
     monkeypatch.setattr(communicator_module, "DecisionRunner", runner)
     with pytest.raises(ValueError, match="another agent"):
-        await communicator_module.communicate({"task": {"agent": "EXECUTE"}})
+        await communicator_module.communicate({"task": {"agent": "EXECUTE"}}, Runtime())
     runner.assert_not_called()
 
 

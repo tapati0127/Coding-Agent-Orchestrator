@@ -1,4 +1,4 @@
-"""Async Store boundary for Dispatcher and Communicator's progress reads.
+"""Remote Store boundary for the separate Dispatcher process.
 
 Namespaces are logical partitions, not security boundaries. Keep this adapter out
 of Qwen's tool environment. InMemoryStore is for tests, never a runtime fallback.
@@ -27,6 +27,8 @@ class InMemoryStore:
 
 
 class SDKStore:
+    """Dispatcher's remote adapter; graph nodes use injected Runtime.store."""
+
     def __init__(self, url=None, token=None):
         from langgraph_sdk import get_client
         self.client = get_client(

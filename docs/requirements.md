@@ -41,7 +41,7 @@
 1. **Pass 1 — Work:** chạy Qwen Code để thực hiện nhiệm vụ chuyên biệt. Plan tạo kế hoạch **bằng ngôn ngữ tự nhiên**; Execute viết/chạy code; Verify thực hiện review/kiểm tra; v.v. Ghi log, kết quả và references đến artifacts.
 2. **Pass 2 — Graph decision:** gọi LangChain `ChatOpenAI.ainvoke()` bất đồng bộ, tắt streaming (`streaming=False`, `disable_streaming=True`, tag `nostream`), để đọc kết quả Pass 1 và sinh **chỉ một `TaskGraphOutput` hợp lệ theo JSON Schema chung**; kể cả không có task mới, vẫn trả graph rỗng cùng outcome và source-task result.
 3. Worker gửi output vào multiprocessing.Queue chung. Dispatcher kiểm tra protocol, quyền, dependencies, transitions, backward budget và idempotency rồi mới ghi graph/task chính thức.
-4. Dispatcher là process ứng dụng duy nhất ghi Store. Worker nhận context qua queue; Communicator chat được đọc trực tiếp trạng thái task/approval từ Store để báo tiến độ và không tự cập nhật task.
+4. Dispatcher là process ứng dụng duy nhất ghi Store. Worker nhận context qua queue; Communicator chat đọc trạng thái task/approval qua `runtime.store` do LangGraph inject (`aget/asearch`), không tạo SDK Store client và không tự cập nhật task. SDK Store adapter chỉ dùng ở process Dispatcher riêng.
 
 Dispatcher cấp task cho worker đang rảnh sau khi kiểm tra readiness và capacity.
 Graph xử lý một lượt rồi kết thúc; worker tiếp tục queue.get() đến sentinel shutdown.
@@ -52,7 +52,8 @@ Communicator đọc tiến độ đã triển khai; hủy task vẫn hoãn, chư
 Communicator gọi ChatOpenAI trực tiếp với prompt riêng và lịch sử `messages`. Chat trực tiếp chỉ cần messages; task Communicator do Dashboard/Dispatcher cấp trả `TaskGraphOutput` sau một lần gọi LLM. API tạo request intake, Dispatcher mở task Communicator. Agent chọn tự giao, hỏi human hoặc giao Analyze; người dùng không cần tương tác trực tiếp với Store. Các worker kỹ thuật chạy nền chờ queue, không chạy nối tiếp ngay trong một lượt chat.
 
 Dashboard gọi graph qua LangGraph SDK proxy với `stream_subgraphs=True` và modes
-`messages-tuple/custom`. Node gọi model bằng `ainvoke`, phát token/reply qua stream,
+`messages-tuple/custom`. Node nhận `Runtime`; Agent Server cấp Store hoặc caller
+truyền Store qua `compile(store=store)` khi chạy local. Node gọi model bằng `ainvoke`, phát token/reply qua stream,
 không return `messages`. Khi chọn project, Communicator đọc task/approval theo
 execution chain; chỉ gọi model khi snapshot đổi. Stream kết thúc khi chain CLOSED,
 chờ câu trả lời human hoặc không còn task active sau nhiều lần đọc ổn định. Đóng

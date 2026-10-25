@@ -29,8 +29,12 @@ Shutdown gửi sentinel cho workers, đợi kết quả flush về Dispatcher, r
 Dispatcher, Agent Server và manager bridge. Các process chết được restart có
 giới hạn như trước. Task đã nhận vẫn được bảo vệ bằng owner, lease và attempt.
 
-Communicator chat đọc trực tiếp task/approval theo execution chain từ Store để
-báo tiến độ. Nó chỉ gọi ChatOpenAI.ainvoke khi snapshot trạng thái đổi, stream
+Communicator chat nhận `Runtime` của LangGraph và đọc task/approval theo execution
+chain bằng `runtime.store.aget/asearch`. Store được Agent Server inject, hoặc được
+truyền qua `builder.compile(store=store)` khi chạy local; subgraph kế thừa Store
+của graph cha. Không tạo SDK client hoặc Store riêng trong node. `SDKStore` chỉ
+còn tại process Dispatcher để truy cập Store của Agent Server từ process ngoài.
+Communicator chỉ gọi ChatOpenAI.ainvoke khi snapshot trạng thái đổi, stream
 token mà không return messages. Theo dõi dừng khi chain CLOSED, chờ human hoặc
 không còn task active sau nhiều lần đọc ổn định. Worker kỹ thuật vẫn không đọc
 Store. Hủy task/CANCEL chưa triển khai; khi thêm phải gửi yêu cầu qua Dispatcher.
