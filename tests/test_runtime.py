@@ -4,6 +4,7 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -61,6 +62,12 @@ def runner(tmp_path, executable, **kwargs):
 
 async def test_real_subprocess_two_passes_streams_redacts_and_isolates_env(tmp_path, monkeypatch):
     executable = fake_cli(tmp_path, '''import json, os, sys
+from pathlib import Path
+settings = json.loads((Path.home() / '.qwen' / 'settings.json').read_text())
+generation = settings['model']['generationConfig']
+assert generation['reasoning'] is False
+assert generation['extra_body']['enable_thinking'] is False
+assert generation['extra_body']['chat_template_kwargs']['enable_thinking'] is False
 assert os.environ['OPENAI_BASE_URL'] == 'http://llm.internal/v1'
 assert os.environ['OPENAI_MODEL'] == 'internal-coder'
 assert 'LANGSMITH_API_KEY' not in os.environ
@@ -321,6 +328,8 @@ async def test_pinned_actual_cli_and_langchain_openai_protocol(tmp_path):
         def do_POST(self):
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             requests.append(request)
+            assert request["enable_thinking"] is False
+            assert request["chat_template_kwargs"]["enable_thinking"] is False
             if not request.get("stream"):
                 assert request["response_format"]["type"] == "json_schema"
                 assert "tools" not in request
@@ -366,29 +375,12 @@ async def test_pinned_actual_cli_and_langchain_openai_protocol(tmp_path):
         thread.join(timeout=2)
 
 
-async def test_communicator_two_passes_use_own_prompt_and_exclude_code_tools(tmp_path, decision_spy):
-    output = result_graph()
-    output.update(producer_agent="COMMUNICATOR", nodes=[{
-        "id": "analyze", "target_agent": "ANALYZE", "title": "Analyze clarified request"}])
-    executable = fake_cli(tmp_path, '''import json, sys
-prompt = sys.argv[sys.argv.index('--prompt') + 1]
-assert "the user's representative" in prompt
-assert 'PRIVATE_HISTORY_MARKER' in prompt
-for tool in ['read_file', 'run_shell_command', 'edit', 'write_file', 'agent', 'web_fetch']:
-    assert tool in sys.argv
-assert '--json-schema' not in sys.argv
-print(json.dumps({'type': 'result', 'result': 'The user wants a customer portal.'}))
-''')
-    decision_spy["outputs"] = [output]
-    qwen = runner(tmp_path, executable)
-    result = await qwen.run(source_task("COMMUNICATOR"), {
-        "Messages": [{"type": "human", "data": {"content": "PRIVATE_HISTORY_MARKER"}}],
-        "delegation": {"backward_count": 0, "max_backward_delegations": 3},
-    }, str(tmp_path))
-    assert result["nodes"][0]["target_agent"] == "ANALYZE"
-    assert "the user's representative" in decision_spy["calls"][0][0]
-    assert "PRIVATE_HISTORY_MARKER" in decision_spy["calls"][0][0]
-    assert [p["phase"] for p in qwen.last_run["passes"]] == ["work", "decision"]
+async def test_communicator_never_starts_qwen_code(tmp_path, monkeypatch):
+    invoke = AsyncMock(side_effect=AssertionError("Communicator must not start Qwen Code"))
+    monkeypatch.setattr(QwenRunner, "_invoke", invoke)
+    with pytest.raises(QwenError, match="ChatOpenAI directly"):
+        await runner(tmp_path, "unused").run(source_task("COMMUNICATOR"), {}, str(tmp_path))
+    invoke.assert_not_awaited()
 
 
 async def test_qwen_runtime_drops_conversation_for_execute_even_if_supplied(tmp_path):
@@ -447,7 +439,7 @@ async def test_analyze_invalid_route_repairs_are_bounded_and_release_slot(tmp_pa
     assert result["nodes"][0]["target_agent"] == "PLAN_DELEGATE"
 
 
-@pytest.mark.parametrize("agent", ["ANALYZE", "PLAN_DELEGATE", "EXECUTE", "VERIFY_INTEGRATE", "FINALIZE", "COMMUNICATOR"])
+@pytest.mark.parametrize("agent", ["ANALYZE", "PLAN_DELEGATE", "EXECUTE", "VERIFY_INTEGRATE", "FINALIZE"])
 async def test_skills_and_gitlab_credentials_are_work_only_and_role_scoped(tmp_path, monkeypatch, agent):
     monkeypatch.delenv("WORK_PASS_SKILLS_CONFIG", raising=False)
     monkeypatch.setenv("GITLAB_TOKEN", "glpat-fixture-private-value")

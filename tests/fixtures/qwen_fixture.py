@@ -21,13 +21,12 @@ def main():
     payload = next(json.loads(line) for line in prompt.splitlines() if line.startswith('{"task":'))
     task, context = payload["task"], payload["context"]
     agent = task["agent"]
-    if agent in {"COMMUNICATOR", "ANALYZE", "FINALIZE"}:
+    assert agent != "COMMUNICATOR", "Communicator must use ChatOpenAI directly"
+    if agent in {"ANALYZE", "FINALIZE"}:
         assert context["Messages"][0]["type"] == "human"
         assert "Build independent API and UI" in context["Messages"][0]["data"]["content"]
     else:
         assert "Messages" not in context
-    if agent == "COMMUNICATOR":
-        assert not Path(".git").exists()
     assert "--json-schema" not in sys.argv, "Decision must use LangChain, not CLI"
     emit({"type": "assistant", "fixture_phase": "start", "at": time.time(), "message": "fixture work"})
     if agent == "EXECUTE":

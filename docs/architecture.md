@@ -2,15 +2,40 @@
 
 ## Process và dữ liệu
 
-Một Supervisor chạy Agent Server, Dispatcher và các worker độc lập trong một container. Sáu graph không có cạnh giao việc với nhau. Cả sáu graph chạy hai pass: Work qua Qwen Code CLI, rồi Decision qua LangChain `ChatOpenAI.ainvoke()` để sinh JSON theo cùng `TaskGraphOutput`. Decision đặt `streaming=False`, `disable_streaming=True`, tag `nostream`, dùng Chat Completions JSON Schema và cấu hình `DECISION_*` (bỏ trống thì kế thừa `QWEN_*`). Communicator có prompt riêng hướng người dùng, không được cấp công cụ đọc/sửa repository. Dashboard enqueue yêu cầu, Dispatcher tạo task Communicator trước Analyze.
+Supervisor tạo `multiprocessing.Queue` và khởi động Dispatcher cùng các worker
+bằng `multiprocessing.Process` với start method spawn. Mỗi worker có queue nhận
+việc riêng; mọi worker gửi heartbeat, kết quả và lỗi vào một queue chung.
 
-Worker gửi claim, heartbeat và kết quả vào request inbox. Dispatcher kiểm tra quyền sở hữu task/lease, schema, DAG, ALL-join, outcome, chuyển trạng thái, tích hợp Git và backward budget, rồi ghi tasks/plans/events/receipts. Worker không ghi namespace task chính thức. Store là dữ liệu liên graph; checkpoint không thay thế Store.
+Dispatcher là process ứng dụng duy nhất tạo Store client. Nó đọc task, kiểm tra
+DAG/dependencies và concurrency, claim độc quyền rồi dựng snapshot `task`,
+`project`, `context`, `predecessors`, `thread_id` cho worker. Worker chờ
+`queue.get()` và invoke graph local, không dùng Store/SDK hay polling receipt.
+Communicator gọi ChatOpenAI trực tiếp; năm role kỹ thuật dùng Work qua Qwen Code
+và Decision qua ChatOpenAI. Graph kết thúc sau một lượt, worker quay lại chờ.
 
-Số Execute workers có thể tới 5, nhưng mọi graph dùng chung giới hạn 5 lượt xử lý, mỗi lượt giữ slot xuyên suốt Work và Decision (kể cả sửa quyết định). Limiter dùng semaphore theo process và phạm vi `DATA_ROOT`, với chờ bất đồng bộ không block event loop; giới hạn vẫn áp dụng khi graph chạy trên nhiều event loop trong Agent Server. Supervisor truyền rõ `--n-jobs-per-worker 10`: CLI đã pin mặc định chỉ một background run và ghi đè cấu hình concurrency chỉ đặt bằng biến môi trường. Chỉ graph Verify được `IN_REVIEW`. Chỉ Finalize được đề nghị đóng các task hợp lệ; Dispatcher thực hiện đóng. Rework tạo task mới để giữ lịch sử, không mở lại task `DONE`. Node rework có thể khai báo `replaces_task_id` để thay một task `DONE` thất bại cùng vai trò. Dispatcher giữ nguyên status/outcome cũ, kiểm tra replacement và dùng alias tới task thay thế để các task downstream đang chờ theo dõi kết quả rework đã được chấp nhận; không âm thầm sửa dependency của task đang chạy.
+`langgraph.json` chỉ expose graph Communicator (`START → communicate → END`).
+Agent Server phục vụ chat và Dashboard. Một manager bridge loopback nối Dashboard
+với queue Dispatcher vì Agent Server chạy bằng chương trình CLI riêng. Bridge
+chỉ vận chuyển yêu cầu/phản hồi; nó không truy cập Store. Các worker nhận queue
+trực tiếp, không đi qua manager hoặc Agent Server để thực thi graph.
+
+Giới hạn Qwen toàn hệ thống nằm ở Dispatcher; Communicator không chiếm slot.
+Semaphore trong QwenRunner chỉ có phạm vi một worker process. Task và journal
+vẫn lưu trong Store; queue không lưu bền. Dispatcher phục hồi task sau lease hết
+hạn hoặc restart. Mọi heartbeat/result/failure từ worker có task_attempt; kết quả
+của lượt đã hết hạn bị từ chối ngay cả khi worker ID được dùng lại.
+
+Shutdown gửi sentinel cho workers, đợi kết quả flush về Dispatcher, rồi dừng
+Dispatcher, Agent Server và manager bridge. Các process chết được restart có
+giới hạn như trước. Task đã nhận vẫn được bảo vệ bằng owner, lease và attempt.
+
+Communicator đọc Store báo tiến độ và yêu cầu hủy là phần làm sau. Hiện chưa có
+CANCEL hoặc tool truy vấn Store cho agent. Khi thêm, yêu cầu vẫn phải đi qua
+Dispatcher; worker không cần thêm quyền truy cập Store.
 
 Communicator dùng `backward_count` chung khi tự giao hoặc hỏi human, không có bộ đếm hỏi riêng. Approval của Communicator có deadline (mặc định 1800 giây). Trả lời hoặc timeout tạo task Communicator trong cùng chain qua journal/receipt hiện có; timeout ghi SystemMessage, không giả tạo HumanMessage hay phê duyệt. Khi timeout hoặc hết ngân sách, Communicator bàn giao Analyze với giả định công khai. Từ chối không tiếp tục. Task hỏi đã DONE/SUCCESS vì lượt giao tiếp hoàn tất; không giữ lease khi chờ human.
 
-`CommunicatorState.Messages` là danh sách `AnyMessage` dùng reducer `add_messages`. Lịch sử được journal theo chain ở `("coding", project_id, "conversations")`, không nằm trong shared context/task description. Chỉ Communicator, Analyze, Finalize được scoped adapter đọc lịch sử. Finalize dùng nó đối chiếu nghiệm thu với mong muốn người dùng; các role còn lại chỉ nhận brief/contract. Dashboard có projection riêng của tin nhắn human/ai.
+`CommunicatorState.messages` là danh sách `AnyMessage` dùng reducer `add_messages`. Lịch sử được journal theo chain ở `("coding", project_id, "conversations")`, không nằm trong shared context/task description. Dispatcher dùng scoped adapter để cấp lịch sử cho Communicator, Analyze, Finalize. Finalize dùng nó đối chiếu nghiệm thu với mong muốn người dùng; các role còn lại chỉ nhận brief/contract. Dashboard có projection riêng của tin nhắn human/ai.
 
 ## HTTP và quyền
 
@@ -29,7 +54,7 @@ Agent Server phục vụ cả `/dashboard` và API giao diện `/api/*`. Built-i
 
 Không bật custom-route auth mặc định của Agent Server cho `/api/*`, vì các route này kiểm tra dashboard token riêng. CORS mặc định cùng origin. Không đưa token vào URL hoặc gửi private scratchpad/raw Qwen logs lên browser. Dashboard stream tiến độ công khai, không stream scratchpad hay raw subprocess output. Patch/report content chỉ hiển thị qua shared artifact references đã được Dispatcher chấp nhận và kiểm tra scope; file trên disk không tự động thành tài liệu public. Shared promotion là đề xuất phải được Dispatcher kiểm tra.
 
-Private namespace là phân vùng logic, không phải ACL. ScopedContext chỉ dựng shared context và private đúng owner; không đưa SDK Store credentials vào Qwen environment. Một container không bảo vệ được dữ liệu khỏi code độc hại cùng quyền user.
+Private namespace là phân vùng logic, không phải ACL. Dispatcher dùng ScopedContext dựng shared context và private đúng owner; không đưa SDK Store credentials vào Qwen environment. Một container không bảo vệ được dữ liệu khỏi code độc hại cùng quyền user.
 
 ## Git
 

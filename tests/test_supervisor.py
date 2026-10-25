@@ -1,20 +1,17 @@
 from pathlib import Path
 import signal
-import subprocess
-import sys
 
 import pytest
 
 from orchestrator.config import Settings
-from orchestrator.supervisor import Child, Supervisor, child_commands, prepare_persistence, server_command
+from orchestrator.supervisor import Supervisor, worker_specs, prepare_persistence, server_command
 
 
 def test_process_topology_has_one_worker_per_role_and_five_execute_slots():
-    commands = child_commands(Settings())
-    assert len(commands) == 11  # Dispatcher + five single-role workers + five Execute.
-    assert len([name for name, _ in commands if name.startswith("execute-")]) == 5
-    assert [name for name, _ in commands].count("dispatcher") == 1
-    assert not any("uvicorn" in arg for _, args in commands for arg in args)
+    roles = worker_specs(Settings())
+    assert len(roles) == 10
+    assert list(roles.values()).count("EXECUTE") == 5
+    assert list(roles.values()).count("COMMUNICATOR") == 1
 
 
 def test_server_explicitly_overrides_pinned_cli_serial_concurrency_default():
@@ -60,17 +57,24 @@ def test_persistence_refuses_replacing_an_existing_symlink(tmp_path):
         prepare_persistence(cwd, tmp_path / "data")
 
 
-def test_shutdown_forwards_sigterm_and_reaps_processes(tmp_path):
-    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+def wait_for_shutdown(inbox):
+    assert inbox.get() is None
+
+
+def test_shutdown_sends_queue_sentinel_and_joins_worker_process(tmp_path):
     supervisor = Supervisor(Settings(), cwd=tmp_path)
-    supervisor.children.append(Child("worker", [sys.executable], process))
+    inbox = supervisor.context.Queue()
+    process = supervisor.context.Process(target=wait_for_shutdown, args=(inbox,))
+    process.start()
+    supervisor.inboxes["worker"] = inbox
+    supervisor.children["worker"] = process
     supervisor.shutdown()
-    assert process.returncode == -signal.SIGTERM
-    assert supervisor.children == []
+    assert process.exitcode == 0
+    assert supervisor.children == {}
 
 
 def test_missing_auth_stops_before_opening_server_port(tmp_path):
     supervisor = Supervisor(Settings(), cwd=tmp_path)
     with pytest.raises(RuntimeError, match="distinct ORCHESTRATOR_TOKEN"):
         supervisor.run()
-    assert supervisor.children == []
+    assert supervisor.children == {}

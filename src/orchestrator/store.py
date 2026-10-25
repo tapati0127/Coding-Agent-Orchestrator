@@ -1,4 +1,4 @@
-"""Small async Store boundary. Only Dispatcher writes authoritative namespaces.
+"""Async Store boundary used only by Dispatcher in the application processes.
 
 Namespaces are logical partitions, not security boundaries. Keep this adapter out
 of Qwen's tool environment. InMemoryStore is for tests, never a runtime fallback.
@@ -19,9 +19,6 @@ class InMemoryStore:
 
     async def delete(self, ns, key):
         self.records.pop((tuple(ns), key), None)
-
-    async def inboxes(self):
-        return sorted({n for n, _ in self.records if len(n) == 4 and n[0] == "coding" and n[2] == "requests"})
 
     async def search(self, ns, limit=10000):
         prefix = tuple(ns)
@@ -46,16 +43,6 @@ class SDKStore:
 
     async def delete(self, ns, key):
         await self.client.store.delete_item(tuple(ns), key)
-
-    async def inboxes(self):
-        namespaces, offset = [], 0
-        while True:
-            response = await self.client.store.list_namespaces(prefix=["coding"], limit=100, offset=offset)
-            batch = response["namespaces"]
-            namespaces.extend(tuple(n) for n in batch if len(n) == 4 and n[2] == "requests")
-            if len(batch) < 100:
-                return namespaces
-            offset += len(batch)
 
     async def search(self, ns, limit=10000):
         result = []

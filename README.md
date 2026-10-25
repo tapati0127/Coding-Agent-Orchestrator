@@ -48,9 +48,49 @@ Các kiểm thử tự động dùng Qwen subprocess, phản hồi HTTP LLM gi�
 
 ## Communicator và hội thoại
 
+`langgraph.json` chỉ expose graph `communicator`. Gửi tin nhắn trực tiếp vào graph:
+
+```json
+{"messages": [{"role": "user", "content": "Tôi muốn xây dựng portal cho khách hàng"}]}
+```
+
+Node `communicate` đọc lịch sử `messages` và gọi ChatOpenAI trực tiếp; không cần
+`task`, `cwd` hoặc Qwen Code. Dùng cùng thread để giữ lịch sử qua các lượt chat.
+Chat trực tiếp trả lời bằng `AIMessage`; luồng Dashboard bên dưới tạo task dự án.
+
+Supervisor tạo một queue kết quả chung và một queue nhận việc cho mỗi worker
+bằng `multiprocessing.Queue`, rồi khởi động Dispatcher và các worker bằng
+`multiprocessing.Process` (spawn).
+
+```text
+Dispatcher đọc/ghi Store
+    → cấp task + context → queue của worker
+    → worker queue.get() → invoke graph local → queue kết quả chung
+    → Dispatcher kiểm tra, lưu kết quả và giao task tiếp theo
+```
+
+**Chỉ Dispatcher có Store client.** Dispatcher dựng context, kiểm tra dependencies,
+claim task và cấp lease trước khi giao việc. Worker không poll Store, không chờ
+receipt và không gọi LangGraph SDK. Worker chờ bằng `queue.get()`, log bắt đầu/kết
+thúc/lỗi, rồi chạy graph ngay trong process của mình. Mỗi graph run xử lý một task
+và kết thúc; vòng chờ tiếp tục cho tới khi nhận sentinel shutdown.
+
+Các queue chỉ nằm trong RAM. Sau restart, Dispatcher đọc task còn lưu trong Store,
+phục hồi lease hết hạn và giao lại việc còn hợp lệ. Mã lượt chạy (`task_attempt`)
+giúp từ chối heartbeat/kết quả cũ của lượt đã hết lease. Giới hạn Qwen toàn hệ thống
+được Dispatcher kiểm tra khi cấp việc; Communicator không chiếm slot Qwen.
+
+Agent Server chỉ expose Communicator và phục vụ Dashboard. Do nó là process ngoài,
+Supervisor mở một `multiprocessing.Manager` bridge trên loopback để Dashboard gửi
+yêu cầu và nhận phản hồi từ Dispatcher. Dashboard cũng không mở Store client.
+Chạy qua Supervisor để có bridge; graph chat `messages` vẫn dùng được riêng.
+
+Quyền Communicator đọc tiến độ và hủy task chưa triển khai; chưa thêm `CANCEL`.
+
 Yêu cầu từ Dashboard tạo task Communicator thực sự. Agent này gọi LLM với
 `prompts/communicator.md`, đứng về phía người dùng để làm rõ mục tiêu, phạm vi và
-kết quả mong muốn; không khám phá repository hoặc dùng công cụ sửa code.
+kết quả mong muốn. Task Communicator chỉ gọi ChatOpenAI một lần với lịch sử
+`messages` và metadata của task để trả `TaskGraphOutput` cho Dispatcher.
 Communicator chọn giao cho chính nó, hỏi human bằng `human_request`/`HUMAN_APPROVAL`,
 hoặc bàn giao bản tóm tắt yêu cầu cho Analyze.
 
@@ -61,9 +101,9 @@ chuyển `TIMED_OUT` và Dispatcher tạo task Communicator tiếp tục trong c
 Communicator chuyển sang Analyze với giả định nêu rõ khi hết thời gian hoặc hết
 ngân sách; không coi im lặng là phê duyệt. Người dùng từ chối thì không tự tiếp tục.
 
-State Communicator có `Messages: Annotated[list[AnyMessage], add_messages]`.
+State Communicator có `messages: Annotated[list[AnyMessage], add_messages]`.
 Dispatcher journal lịch sử theo chain ở namespace `conversations`; scoped context
-chỉ cấp lịch sử cho Communicator, Analyze và Finalize. Các agent còn lại nhận brief
+do Dispatcher dùng chỉ cấp lịch sử cho Communicator, Analyze và Finalize. Các agent còn lại nhận brief
 và shared contracts. Dashboard hiển thị hội thoại cho người dùng đã xác thực.
 Đây là giới hạn cấp context, không phải sandbox filesystem giữa các process.
 
@@ -76,7 +116,13 @@ tốn backward budget. Nếu vẫn sai, lượt chạy báo lỗi để xử lý
 
 ## Cấu hình
 
-Work pass chạy Qwen Code CLI. Decision pass gửi role prompt, task/context được cấp
+Thinking được tắt cho cả hai pass. ChatOpenAI gửi `enable_thinking=false` và
+`chat_template_kwargs.enable_thinking=false` qua `extra_body`. Qwen Code nhận
+cùng các tham số trong `model.generationConfig.extra_body`, cùng `reasoning=false`,
+qua file `~/.qwen/settings.json` trong HOME riêng của từng Work session.
+Endpoint/model cần hỗ trợ tham số tương ứng để áp dụng chế độ không thinking.
+
+Với các agent kỹ thuật, Work pass chạy Qwen Code CLI. Decision pass gửi role prompt, task/context được cấp
 và kết quả Work pass sang `langchain_openai.ChatOpenAI`, gọi bất đồng bộ bằng
 `ainvoke()`. Cả `streaming=False` và `disable_streaming=True` được đặt để tắt stream,
 kể cả khi LangGraph có callback streaming. Tag `nostream` ngăn phản hồi Decision
@@ -85,9 +131,9 @@ phát ra qua luồng `messages` của LangGraph. Decision dùng Chat Completions
 này. Runtime vẫn kiểm tra `TaskGraphOutput`, danh tính source và quyền giao task.
 
 Đặt `DECISION_BASE_URL`, `DECISION_API_KEY`, `DECISION_MODEL` để dùng LLM nội bộ
-riêng; từng biến bỏ trống sẽ dùng giá trị `QWEN_*` tương ứng. Timeout Decision mặc
+cho Communicator và Decision; từng biến bỏ trống dùng giá trị `QWEN_*` tương ứng. Timeout mặc
 định 120 giây qua `DECISION_TIMEOUT_SECONDS`. SDK không tự retry; lỗi đi qua retry
-kỹ thuật hiện có. Cả hai pass dùng chung giới hạn phiên của runtime.
+kỹ thuật hiện có. Dispatcher giới hạn số task kỹ thuật đang hoạt động trên toàn hệ thống.
 
 Skills của từng Work pass được khai báo trong [config/work_pass_skills.json](config/work_pass_skills.json).
 Mặc định `ANALYZE` dùng `gitlab-cli`; các role khác có danh sách rỗng. Thêm skill
@@ -124,7 +170,7 @@ quyền truy cập GitLab còn phụ thuộc token được cấp.
 
 | Biến | Ý nghĩa |
 | --- | --- |
-| `ORCHESTRATOR_TOKEN` | Token nội bộ cho Store/graph SDK; không phát cho browser |
+| `ORCHESTRATOR_TOKEN` | Token Agent Server và Store client của Dispatcher; không phát cho browser |
 | `DASHBOARD_TOKEN` | Token riêng cho API giao diện |
 | `QWEN_BASE_URL`, `QWEN_API_KEY`, `QWEN_MODEL` | Endpoint/model OpenAI-compatible cho Qwen Code |
 | `DECISION_BASE_URL`, `DECISION_API_KEY`, `DECISION_MODEL` | LLM nội bộ cho Decision; từng giá trị mặc định theo `QWEN_*` |

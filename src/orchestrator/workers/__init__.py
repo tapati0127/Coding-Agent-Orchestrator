@@ -1,1 +1,1 @@
-"""Worker processes submit requests; they never write authoritative task state."""
+"""Workers receive task/context snapshots and return results through Python queues."""

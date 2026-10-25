@@ -1,8 +1,8 @@
 """Bounded Qwen Code work pass followed by an async LangChain decision.
 
 Only this trusted runtime maps QWEN_* to the pinned CLI's OPENAI_* interface.
-The semaphore is shared by all graph invocations in one Agent Server process.
-Multiple server processes are deliberately unsupported by the MVP supervisor.
+The semaphore bounds invocations inside one Python process. Dispatcher owns the
+global session limit across worker processes.
 """
 
 from __future__ import annotations
@@ -18,29 +18,17 @@ import threading
 import uuid
 from pathlib import Path
 from importlib.resources import files
-from typing import Any, Callable
+from typing import Callable
 from urllib.parse import urlsplit
 
 from .context_scope import CONVERSATION_READERS, identifier
-from .decision import DecisionRunner
+from .decision import DecisionRunner, safe_payload as _safe_payload
 from orchestrator.schemas.delegation import InvalidDelegation, decision_schema, validate_delegation
 from .skills import SKILL_SECRET_ENVIRONMENT, load_work_skills
 
 QWEN_VERSION = "0.26.1"
 _POOLS: dict[str, tuple[int, threading.BoundedSemaphore]] = {}
 _POOLS_LOCK = threading.Lock()
-_SECRET_KEYS = ("api_key", "apikey", "token", "password", "credential", "secret")
-# --safe-mode does not enforce --core-tools as an allowlist in 0.26.1. Remove
-# the built-ins explicitly for Communicator's conversation-only work pass.
-_CONVERSATION_EXCLUSIONS = (
-    "agent", "edit", "glob", "grep_search", "notebook_edit", "read_file",
-    "run_shell_command", "skill", "tool_call", "tool_search", "write_file",
-    "list_directory", "read_many_files", "web_fetch", "web_search", "ask_user_question",
-    "save_memory", "todo_write", "exit_plan_mode", "enter_plan_mode", "code_mode",
-    "cron_create", "cron_delete", "cron_list", "enter_worktree", "exit_worktree",
-    "get_goal", "list_agents", "loop_wakeup", "read_mcp_resource", "record_artifact",
-    "report_findings", "send_message", "task_stop", "update_goal",
-)
 _ENV_ALLOWLIST = {
     "PATH", "LANG", "LC_ALL", "TERM", "TMPDIR", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR",
     "NODE_EXTRA_CA_CERTS", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy",
@@ -78,15 +66,6 @@ async def _slots(scope: str, limit: int):
         yield
     finally:
         semaphore.release()
-
-
-def _safe_payload(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(k): _safe_payload(v) for k, v in value.items()
-                if not any(word in str(k).lower() for word in _SECRET_KEYS)}
-    if isinstance(value, (list, tuple)):
-        return [_safe_payload(v) for v in value]
-    return value
 
 
 class QwenRunner:
@@ -130,6 +109,16 @@ class QwenRunner:
 
     def _child_env(self, state_dir: Path) -> dict[str, str]:
         state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        settings_dir = state_dir / ".qwen"
+        settings_dir.mkdir(mode=0o700, exist_ok=True)
+        # Native Qwen settings apply to every request in this Work session.
+        # Cover DashScope and Qwen models served through vLLM/SGLang templates.
+        (settings_dir / "settings.json").write_text(json.dumps({
+            "model": {"generationConfig": {
+                "reasoning": False,
+                "extra_body": {"enable_thinking": False, "chat_template_kwargs": {"enable_thinking": False}},
+            }},
+        }), encoding="utf-8")
         env = {key: value for key, value in os.environ.items() if key in _ENV_ALLOWLIST}
         env.update({
             "HOME": str(state_dir), "USERPROFILE": str(state_dir),
@@ -173,7 +162,9 @@ class QwenRunner:
         self._validate_config()
         self.decision.validate_config()
         agent = str(task.get("agent", task.get("producer_agent", ""))).upper()
-        if agent not in {"COMMUNICATOR", "ANALYZE", "PLAN_DELEGATE", "EXECUTE", "VERIFY_INTEGRATE", "FINALIZE"}:
+        if agent == "COMMUNICATOR":
+            raise QwenError("Communicator uses ChatOpenAI directly, not Qwen Code")
+        if agent not in {"ANALYZE", "PLAN_DELEGATE", "EXECUTE", "VERIFY_INTEGRATE", "FINALIZE"}:
             raise QwenError("Unknown Qwen agent")
         if agent not in CONVERSATION_READERS:
             context = {key: value for key, value in context.items()
@@ -194,7 +185,6 @@ class QwenRunner:
                          "work_skills": list(skills.names)}
         async with _slots(pool_scope, self.max_sessions):
             work = await self._invoke(work_prompt, cwd_path, run_dir, "work", on_log=on_log,
-                                      conversation_only=agent == "COMMUNICATOR",
                                       skill_environment=skills.environment)
             decision_prompt = (
                 "Generate exactly one TaskGraphOutput using the supplied JSON Schema. This is a decision pass; "
@@ -273,12 +263,10 @@ class QwenRunner:
     async def _invoke(
         self, prompt: str, cwd: Path, run_dir: Path, phase: str,
         on_log: Callable | None = None,
-        conversation_only: bool = False,
         skill_environment: tuple[str, ...] = (),
     ) -> dict:
         args = [self.executable, "--prompt", prompt, "--output-format", "stream-json", "--safe-mode", "--auth-type", "openai",
-                "--approval-mode", "yolo", "--max-session-turns", "50", "--exclude-tools"]
-        args += list(_CONVERSATION_EXCLUSIONS) if conversation_only else ["agent"]
+                "--approval-mode", "yolo", "--max-session-turns", "50", "--exclude-tools", "agent"]
         log_path = run_dir / f"{phase}.jsonl"
         child_env = await asyncio.to_thread(self._prepare_invocation, log_path, run_dir / "home" / phase,
                                            skill_environment)

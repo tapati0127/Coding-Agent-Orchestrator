@@ -46,7 +46,10 @@ class Dispatcher:
 
     async def _apply(self, journal):
         for write in journal["writes"]:
-            await self.store.put(tuple(write["ns"]), write["key"], write["value"])
+            if write.get("op") == "delete":
+                await self.store.delete(tuple(write["ns"]), write["key"])
+            else:
+                await self.store.put(tuple(write["ns"]), write["key"], write["value"])
         journal = {**journal, "applied": True}
         await self.store.put(("coding", journal["project_id"], "operations"),
                              journal["request_id"], journal)
@@ -105,7 +108,8 @@ class Dispatcher:
         put(response_ns, rid, receipt)
         event = {"event_id": rid, "project_id": project,
                  "kind": envelope.get("kind"), "accepted": receipt["accepted"],
-                 "task_id": envelope.get("task_id"), "timestamp": self.clock(),
+                 "task_id": envelope.get("task_id") or receipt.get("task", {}).get("task_id"),
+                 "agent": agent, "worker_id": envelope.get("worker_id"), "timestamp": self.clock(),
                  "reason": receipt.get("reason")}
         put(("coding", project, "events"), rid, event)
         journal = {"request_id": rid, "project_id": project,
@@ -213,14 +217,15 @@ class Dispatcher:
             active = [t for t in all_tasks if t.status in (Status.DOING, Status.IN_REVIEW)]
             if any(t.assigned_worker == worker for t in active):
                 raise ValueError("worker already owns a task")
-            if len(active) >= self.max_qwen_sessions:
+            if agent != Agent.COMMUNICATOR and sum(t.agent != Agent.COMMUNICATOR for t in active) >= self.max_qwen_sessions:
                 raise ValueError("global Qwen capacity exhausted")
             if agent == Agent.EXECUTE and sum(t.agent == Agent.EXECUTE for t in active) >= self.max_execute_workers:
                 raise ValueError("Execute capacity exhausted")
             ready = ready_tasks(tasks, agent)
-            if not ready:
+            requested = e.get("task_id")
+            task = next((item for item in ready if not requested or item.task_id == requested), None)
+            if task is None:
                 raise ValueError("no_ready_task")
-            task = ready[0]
             transition(task, Status.DOING)
             task.assigned_worker, task.lease_expires_at = worker, self.clock() + self.lease_seconds
             task.attempt += 1
@@ -236,6 +241,8 @@ class Dispatcher:
             raise ValueError("task is not active and owned by this worker/agent")
         if task.lease_expires_at is not None and task.lease_expires_at <= self.clock():
             raise ValueError("task lease expired; recovery required")
+        if e.get("task_attempt", task.attempt) != task.attempt:
+            raise ValueError("task attempt is stale")
         if kind == "heartbeat":
             task.lease_expires_at = self.clock() + self.lease_seconds
             for name in ("worktree_path", "base_commit", "branch", "thread_id", "qwen_session_id"):

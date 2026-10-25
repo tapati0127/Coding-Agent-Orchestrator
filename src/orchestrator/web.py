@@ -2,7 +2,7 @@
 
 The browser receives a separate dashboard token.  It cannot use that token with
 the Agent Server's built-in Store or graph APIs.  These routes publish only
-shared projections and append human requests to the Communicator inbox.
+shared projections and send requests to Dispatcher through Python queues.
 """
 
 from __future__ import annotations
@@ -14,12 +14,13 @@ import os
 import re
 from pathlib import Path
 from typing import Annotated, Any
-from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from orchestrator.queues import get_dispatcher
 
 
 PROJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
@@ -46,13 +47,7 @@ async def authorize(request: Request) -> None:
         raise HTTPException(401, "Invalid dashboard token")
 
 
-def get_store() -> Any:
-    from orchestrator.store import SDKStore
-
-    return SDKStore(url=os.environ.get("LANGGRAPH_URL", "http://127.0.0.1:2024"))
-
-
-Store = Annotated[Any, Depends(get_store)]
+DispatcherData = Annotated[Any, Depends(get_dispatcher)]
 app = FastAPI(title="Qwen Orchestrator dashboard", docs_url=None, redoc_url=None)
 
 
@@ -96,20 +91,8 @@ class ApprovalDecision(StrictInput):
     answer: str = Field(default="", max_length=20000)
 
 
-async def enqueue(store: Any, pid: str, kind: str, payload: dict) -> dict:
-    request_id = str(uuid4())
-    await store.put(
-        ("coding", pid, "requests", "COMMUNICATOR"),
-        request_id,
-        {
-            "request_id": request_id,
-            "kind": kind,
-            "project_id": pid,
-            "agent": "COMMUNICATOR",
-            "payload": payload,
-        },
-    )
-    return {"request_id": request_id, "status": "submitted"}
+async def enqueue(dispatcher: Any, pid: str, kind: str, payload: dict) -> dict:
+    return await dispatcher.submit(pid, kind, payload)
 
 
 def public(record: dict, keys: set[str]) -> dict:
@@ -146,29 +129,29 @@ async def dashboard() -> FileResponse:
     return FileResponse(STATIC_ROOT / "index.html", headers={
         "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'",
         "X-Content-Type-Options": "nosniff",
-        "Cache-Control": "no-store",
+        "Cache-Control": "no-dispatcher",
     })
 
 
 @app.get("/api/projects", dependencies=[Depends(authorize)])
-async def projects(store: Store) -> dict:
-    rows = await store.search(("coding", "projects"))
+async def projects(dispatcher: DispatcherData) -> dict:
+    rows = await dispatcher.search(("coding", "projects"))
     return {"projects": [public(row, PROJECT_FIELDS) for row in rows]}
 
 
 @app.post("/api/projects", status_code=202, dependencies=[Depends(authorize)])
-async def create_project(body: NewProject, store: Store) -> dict:
-    return await enqueue(store, body.project_id, "register_project", body.model_dump())
+async def create_project(body: NewProject, dispatcher: DispatcherData) -> dict:
+    return await enqueue(dispatcher, body.project_id, "register_project", body.model_dump())
 
 
 @app.get("/api/projects/{pid}/snapshot", dependencies=[Depends(authorize)])
-async def snapshot(pid: str, store: Store) -> dict:
+async def snapshot(pid: str, dispatcher: DispatcherData) -> dict:
     pid = project_id(pid)
-    project = await store.get(("coding", "projects"), pid)
+    project = await dispatcher.get(("coding", "projects"), pid)
     if project is None:
         raise HTTPException(404, "Project not found")
     tasks, plans, events, approvals, workers, artifacts, notifications, conversations = await asyncio.gather(*(
-        store.search(("coding", pid, *parts)) for parts in (
+        dispatcher.search(("coding", pid, *parts)) for parts in (
             ("tasks",), ("plans",), ("events",), ("approvals",), ("workers",),
             ("shared", "artifacts"),
             ("notifications",),
@@ -217,25 +200,25 @@ async def snapshot(pid: str, store: Store) -> dict:
 
 
 @app.post("/api/projects/{pid}/messages", status_code=202, dependencies=[Depends(authorize)])
-async def message(pid: str, body: Message, store: Store) -> dict:
-    return await enqueue(store, project_id(pid), "human_message", body.model_dump())
+async def message(pid: str, body: Message, dispatcher: DispatcherData) -> dict:
+    return await enqueue(dispatcher, project_id(pid), "human_message", body.model_dump())
 
 
 @app.post("/api/projects/{pid}/approvals/{approval_id}", status_code=202, dependencies=[Depends(authorize)])
-async def approval(pid: str, approval_id: str, body: ApprovalDecision, store: Store) -> dict:
+async def approval(pid: str, approval_id: str, body: ApprovalDecision, dispatcher: DispatcherData) -> dict:
     pid = project_id(pid)
     project_id(approval_id)
-    record = await store.get(("coding", pid, "approvals"), approval_id)
+    record = await dispatcher.get(("coding", pid, "approvals"), approval_id)
     if record is None:
         raise HTTPException(404, "Approval not found")
-    return await enqueue(store, pid, "approval", {"approval_id": approval_id, **body.model_dump()})
+    return await enqueue(dispatcher, pid, "approval", {"approval_id": approval_id, **body.model_dump()})
 
 
 @app.get("/api/projects/{pid}/artifacts/{artifact_id}", dependencies=[Depends(authorize)])
-async def artifact(pid: str, artifact_id: str, store: Store) -> dict:
+async def artifact(pid: str, artifact_id: str, dispatcher: DispatcherData) -> dict:
     pid = project_id(pid)
     project_id(artifact_id)
-    record = await store.get(("coding", pid, "shared", "artifacts"), artifact_id)
+    record = await dispatcher.get(("coding", pid, "shared", "artifacts"), artifact_id)
     if record is None:
         raise HTTPException(404, "Published artifact not found")
     # Only explicitly shared content, never resolve a filesystem path supplied by a client.
@@ -243,7 +226,7 @@ async def artifact(pid: str, artifact_id: str, store: Store) -> dict:
 
 
 @app.get("/api/projects/{pid}/events", dependencies=[Depends(authorize)])
-async def events(pid: str, request: Request, store: Store) -> StreamingResponse:
+async def events(pid: str, request: Request, dispatcher: DispatcherData) -> StreamingResponse:
     pid = project_id(pid)
 
     async def stream():
@@ -252,8 +235,8 @@ async def events(pid: str, request: Request, store: Store) -> StreamingResponse:
         for _ in range(300):
             if await request.is_disconnected():
                 return
-            rows = await store.search(("coding", pid, "events"))
-            notifications = await store.search(("coding", pid, "notifications"))
+            rows = await dispatcher.search(("coding", pid, "events"))
+            notifications = await dispatcher.search(("coding", pid, "notifications"))
             rows += [
                 {"kind": "notification", **public(row, {"message", "timestamp"})}
                 for row in notifications

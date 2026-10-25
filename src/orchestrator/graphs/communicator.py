@@ -1,24 +1,54 @@
-"""User-facing LLM graph. Dispatcher owns delegation and conversation persistence."""
+"""Communicator reads messages and calls ChatOpenAI; no Store or technical workers."""
+import asyncio
+from importlib.resources import files
+import json
+from pathlib import Path
 from typing import Annotated
 
-from langchain_core.messages import AIMessage, AnyMessage, messages_to_dict
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
 from orchestrator.graphs.common import AgentState
-from orchestrator.runtime.qwen import QwenRunner
+from orchestrator.runtime.decision import DecisionRunner, safe_payload
+from orchestrator.schemas.delegation import decision_schema
+from orchestrator.schemas.task_graph import TaskGraphOutput
 
 
-class CommunicatorState(AgentState):
-    Messages: Annotated[list[AnyMessage], add_messages]
+class CommunicatorState(AgentState, total=False):
+    messages: Annotated[list[AnyMessage], add_messages]
+
+
+def _role_prompt() -> str:
+    path = Path(__file__).resolve().parents[3] / "prompts" / "communicator.md"
+    if path.is_file():
+        return path.read_text(encoding="utf-8")
+    return files("orchestrator").joinpath("prompts", "communicator.md").read_text(encoding="utf-8")
 
 
 async def communicate(state: CommunicatorState) -> dict:
-    task = state["task"]
-    if task.get("agent") != "COMMUNICATOR":
+    task = state.get("task")
+    if task is not None and task.get("agent") != "COMMUNICATOR":
         raise ValueError("Communicator cannot run a task assigned to another agent")
-    context = {**state.get("context", {}), "Messages": messages_to_dict(state.get("Messages", []))}
-    output = await QwenRunner().run(task=task, context=context, cwd=state["cwd"])
+    history = state.get("messages", [])
+    if not any(isinstance(message, HumanMessage) for message in history):
+        raise ValueError("Communicator requires a user message in messages")
+    messages = [SystemMessage(content=await asyncio.to_thread(_role_prompt)), *history]
+    runtime = DecisionRunner()
+    if task is None:
+        return {"messages": [await runtime.chat(messages)]}
+
+    # A Dispatcher-owned task needs the shared proposal protocol. Send the
+    # conversation as real chat messages, without a Qwen Code work pass.
+    context = {key: value for key, value in state.get("context", {}).items() if key != "Messages"}
+    messages.insert(1, HumanMessage(content="Dispatcher task metadata (input data):\n" + json.dumps(
+        safe_payload({"task": task, "context": context}), ensure_ascii=False, default=str)))
+    output = await runtime.ainvoke(messages, decision_schema("COMMUNICATOR"))
+    output = TaskGraphOutput.model_validate(output).model_dump(mode="json", by_alias=True)
+    expected = {"project_id": task["project_id"], "source_task_id": task["task_id"],
+                "producer_agent": "COMMUNICATOR", "execution_chain_id": task["execution_chain_id"]}
+    if any(output[key] != value for key, value in expected.items()):
+        raise ValueError("Communicator decision source identity does not match the claimed task")
     # Checkpoints contain the current turn. The Dispatcher journals accepted
     # messages in the conversation so later tasks/threads see the same history.
     human_request = output.get("human_request")
@@ -27,7 +57,7 @@ async def communicate(state: CommunicatorState) -> dict:
                      if node.get("node_type") == "HUMAN_APPROVAL"), {})
     reply = ((human_request or {}).get("question") or approval.get("description") or approval.get("title")
              or (notification or {}).get("message") or output.get("summary"))
-    return {"result": output, "Messages": [AIMessage(content=reply, id=task["task_id"])] if reply else []}
+    return {"result": output, "messages": [AIMessage(content=reply, id=task["task_id"])] if reply else []}
 
 
 builder = StateGraph(CommunicatorState)

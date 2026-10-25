@@ -1,0 +1,109 @@
+"""Exercise the real decision adapter without a model or external endpoint."""
+
+import asyncio
+import json
+
+import httpx
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from openai import InternalServerError
+
+from orchestrator.runtime.decision import DecisionRunner
+
+
+@pytest.fixture(autouse=True)
+def clean_config(monkeypatch):
+    for prefix in ("DECISION", "QWEN"):
+        for name in ("BASE_URL", "API_KEY", "MODEL", "TIMEOUT_SECONDS"):
+            monkeypatch.delenv(f"{prefix}_{name}", raising=False)
+
+
+def test_decision_settings_override_each_qwen_fallback(monkeypatch):
+    monkeypatch.setenv("DECISION_BASE_URL", "http://decision.internal/v1")
+    monkeypatch.setenv("DECISION_API_KEY", "")
+    monkeypatch.setenv("DECISION_MODEL", "decision-model")
+    monkeypatch.setenv("DECISION_TIMEOUT_SECONDS", "30")
+    runner = DecisionRunner(base_url="http://work.internal/v1", api_key="work-key", model="work-model")
+    runner.validate_config()
+    assert (runner.base_url, runner.api_key, runner.model, runner.timeout) == (
+        "http://decision.internal/v1", "work-key", "decision-model", 30,
+    )
+
+
+@pytest.mark.parametrize("url", ["file:///tmp/model", "http://user:secret@model/v1", "missing-scheme"])
+def test_decision_rejects_invalid_endpoint(url):
+    with pytest.raises(ValueError, match="HTTP"):
+        DecisionRunner(base_url=url, api_key="fixture-key", model="fixture").validate_config()
+
+
+@pytest.mark.parametrize("outcome", ["success", "error", "cancel"])
+@pytest.mark.parametrize("mode", ["decision", "chat"])
+async def test_real_adapter_protocol_and_client_cleanup(monkeypatch, outcome, mode):
+    requests = []
+    clients = []
+    entered = asyncio.Event()
+
+    async def respond(request):
+        requests.append(request)
+        entered.set()
+        if outcome == "error":
+            return httpx.Response(500, json={"error": {"message": "fixture failure"}})
+        if outcome == "cancel":
+            await asyncio.Event().wait()
+        return httpx.Response(200, json={
+            "id": "fixture", "object": "chat.completion", "created": 1, "model": "fixture",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {
+                "role": "assistant", "content": '{"summary": "done"}' if mode == "decision" else "done",
+            }}],
+        })
+
+    class AsyncClient(httpx.AsyncClient):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(respond), **kwargs)
+            clients.append(self)
+
+    class SyncClient(httpx.Client):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            clients.append(self)
+
+    monkeypatch.setattr(httpx, "AsyncClient", AsyncClient)
+    monkeypatch.setattr(httpx, "Client", SyncClient)
+    runner = DecisionRunner(base_url="http://fixture.internal/v1", api_key="fixture-key", model="fixture")
+    schema = {"title": "TaskGraphOutput", "type": "object",
+              "properties": {"summary": {"type": "string"}}, "required": ["summary"]}
+    messages = [SystemMessage(content="Speak plainly"), HumanMessage(content="Build a portal"),
+                AIMessage(content="Who will use it?"), HumanMessage(content="Customers; fixture-key")]
+    task = asyncio.create_task(runner.ainvoke("Return the decision", schema) if mode == "decision"
+                               else runner.chat(messages))
+    if outcome == "cancel":
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    elif outcome == "error":
+        with pytest.raises(InternalServerError):
+            await task
+    else:
+        output = await task
+        if mode == "decision":
+            assert output == {"summary": "done"}
+        else:
+            assert isinstance(output, AIMessage) and output.content == "done"
+
+    assert len(requests) == 1  # SDK must leave retries to the Dispatcher.
+    payload = json.loads(requests[0].content)
+    assert requests[0].url.path == "/v1/chat/completions"
+    assert requests[0].headers["authorization"] == "Bearer fixture-key"
+    assert payload["stream"] is False
+    assert payload["enable_thinking"] is False
+    assert payload["chat_template_kwargs"]["enable_thinking"] is False
+    if mode == "decision":
+        assert payload["response_format"]["type"] == "json_schema"
+        assert payload["response_format"]["json_schema"]["strict"] is False
+    else:
+        assert "response_format" not in payload
+        assert [message["role"] for message in payload["messages"]] == ["system", "user", "assistant", "user"]
+        assert payload["messages"][-1]["content"] == "Customers; [REDACTED]"
+    assert "tools" not in payload
+    assert all(client.is_closed for client in clients)

@@ -14,7 +14,7 @@ class AgentState(TypedDict, total=False):
     result: dict[str, Any]
 
 
-def build_agent_graph(agent: str):
+def build_agent_node(agent: str):
     async def work(state: AgentState) -> dict[str, Any]:
         task = state.get("task", {})
         if task.get("agent") != agent:
@@ -46,8 +46,12 @@ def build_agent_graph(agent: str):
         )
         return {"result": result}
 
+    return work
+
+
+def build_agent_graph(agent: str):
     graph = StateGraph(AgentState)
-    graph.add_node("work", work)
+    graph.add_node("work", build_agent_node(agent))
     graph.add_edge(START, "work")
     graph.add_edge("work", END)
     return graph.compile()

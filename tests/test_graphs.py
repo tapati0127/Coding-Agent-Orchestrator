@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -6,16 +8,18 @@ import pytest
 from orchestrator.graphs import common
 from orchestrator.graphs import communicator as communicator_module
 from orchestrator.graphs.communicator import graph as communicator
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, messages_to_dict
+from langgraph.checkpoint.memory import InMemorySaver
 from orchestrator.schemas.task_graph import TaskGraphOutput
 from orchestrator.workers.graph_runner import run_graph
-from orchestrator.workers.polling import ReceiptTimeout, submit_request
 from orchestrator.workers.main import Worker
+from orchestrator.dispatcher.context import build_job
+from queue import Queue
 from orchestrator.store import InMemoryStore
 
 
 @pytest.mark.parametrize("human_node", [False, True])
-async def test_communicator_calls_llm_with_typed_messages(monkeypatch, tmp_path, human_node):
+async def test_communicator_task_calls_chat_llm_with_typed_messages(monkeypatch, human_node):
     expected = {
         "project_id": "demo", "source_task_id": "task-1", "producer_agent": "COMMUNICATOR",
         "execution_chain_id": "chain-1", "source_result": {"outcome": "SUCCESS"},
@@ -25,26 +29,91 @@ async def test_communicator_calls_llm_with_typed_messages(monkeypatch, tmp_path,
         expected.pop("human_request")
         expected["nodes"] = [{"id": "ask", "node_type": "HUMAN_APPROVAL", "target_agent": "COMMUNICATOR",
                               "title": "Who will use it?"}]
-    runtime = SimpleNamespace(run=AsyncMock(return_value=expected))
-    monkeypatch.setattr(communicator_module, "QwenRunner", lambda: runtime)
+    runtime = SimpleNamespace(ainvoke=AsyncMock(return_value=expected))
+    monkeypatch.setattr(communicator_module, "DecisionRunner", lambda: runtime)
+    monkeypatch.setattr(common, "QwenRunner", Mock(side_effect=AssertionError("No Qwen Code for Communicator")))
     output = await communicator.ainvoke({
-        "task": {"task_id": "task-1", "agent": "COMMUNICATOR"},
+        "task": {"project_id": "demo", "task_id": "task-1", "agent": "COMMUNICATOR",
+                 "execution_chain_id": "chain-1"},
         "context": {"delegation": {"backward_count": 0, "max_backward_delegations": 3}},
-        "cwd": str(tmp_path), "Messages": [HumanMessage(content="Build a portal", id="human-1")],
+        "messages": [HumanMessage(content="Build a portal", id="human-1")],
     })
-    assert isinstance(output["Messages"][0], HumanMessage)
-    assert isinstance(output["Messages"][1], AIMessage)
-    assert output["Messages"][1].content == "Who will use it?"
-    assert runtime.run.call_args.kwargs["context"]["Messages"][0]["data"]["content"] == "Build a portal"
-    assert set(communicator.get_graph().nodes) == {"__start__", "communicate", "__end__"}
+    assert isinstance(output["messages"][0], HumanMessage)
+    assert isinstance(output["messages"][1], AIMessage)
+    assert output["messages"][1].content == "Who will use it?"
+    runtime.ainvoke.assert_awaited_once()
+    messages, schema = runtime.ainvoke.call_args.args
+    assert isinstance(messages[0], SystemMessage)
+    assert isinstance(messages[-1], HumanMessage)
+    assert messages[-1].content == "Build a portal"
+    assert schema["title"] == "TaskGraphOutput"
+    TaskGraphOutput.model_validate(output["result"])
 
 
-async def test_communicator_rejects_wrong_role_before_llm(monkeypatch, tmp_path):
+async def test_communicate_rejects_wrong_role_before_llm(monkeypatch):
     runner = Mock(side_effect=AssertionError("Must validate role first"))
-    monkeypatch.setattr(communicator_module, "QwenRunner", runner)
+    monkeypatch.setattr(communicator_module, "DecisionRunner", runner)
     with pytest.raises(ValueError, match="another agent"):
-        await communicator.ainvoke({"task": {"agent": "EXECUTE"}, "cwd": str(tmp_path)})
+        await communicator_module.communicate({"task": {"agent": "EXECUTE"}})
     runner.assert_not_called()
+
+
+async def test_communicator_accepts_messages_without_task_or_cwd(monkeypatch):
+    runtime = SimpleNamespace(chat=AsyncMock(return_value=AIMessage(content="Chào bạn!")))
+    monkeypatch.setattr(communicator_module, "DecisionRunner", lambda: runtime)
+    monkeypatch.setattr(common, "QwenRunner", Mock(side_effect=AssertionError("No Qwen Code for chat")))
+    output = await communicator.ainvoke({"messages": [{"role": "user", "content": "Xin chào"}]})
+    assert output["messages"][-1].content == "Chào bạn!"
+    assert "result" not in output
+    history = runtime.chat.call_args.args[0]
+    assert isinstance(history[0], SystemMessage)
+    assert "the user's representative" in history[0].content
+    assert isinstance(history[-1], HumanMessage)
+    assert history[-1].content == "Xin chào"
+
+
+async def test_communicator_reads_previous_turns_in_the_same_thread(monkeypatch):
+    runtime = SimpleNamespace(chat=AsyncMock(side_effect=[
+        AIMessage(content="Ai sẽ dùng portal?", id="ai-1"),
+        AIMessage(content="Mình đã ghi nhận khách hàng là người dùng.", id="ai-2"),
+    ]))
+    monkeypatch.setattr(communicator_module, "DecisionRunner", lambda: runtime)
+    graph = communicator_module.builder.compile(checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "conversation-1"}}
+    await graph.ainvoke({"messages": [("user", "Tạo portal")]}, config)
+    output = await graph.ainvoke({"messages": [("user", "Cho khách hàng")]}, config)
+    history = runtime.chat.call_args.args[0]
+    assert [message.content for message in history[1:]] == [
+        "Tạo portal", "Ai sẽ dùng portal?", "Cho khách hàng",
+    ]
+    assert len(output["messages"]) == 4
+
+
+async def test_communicator_requires_a_user_message_before_calling_llm(monkeypatch):
+    runner = Mock(side_effect=AssertionError("No LLM for an empty conversation"))
+    monkeypatch.setattr(communicator_module, "DecisionRunner", runner)
+    with pytest.raises(ValueError, match="user message"):
+        await communicator.ainvoke({"messages": []})
+    runner.assert_not_called()
+
+
+async def test_communicator_rejects_spoofed_task_identity(monkeypatch):
+    runtime = SimpleNamespace(ainvoke=AsyncMock(return_value={
+        "project_id": "demo", "source_task_id": "other-task", "producer_agent": "COMMUNICATOR",
+        "execution_chain_id": "chain-1", "source_result": {"outcome": "SUCCESS"},
+    }))
+    monkeypatch.setattr(communicator_module, "DecisionRunner", lambda: runtime)
+    with pytest.raises(ValueError, match="identity"):
+        await communicator.ainvoke({
+            "task": {"project_id": "demo", "task_id": "task-1", "agent": "COMMUNICATOR",
+                     "execution_chain_id": "chain-1"},
+            "messages": [("user", "Build a portal")],
+        })
+
+
+def test_only_communicator_is_exposed():
+    config = json.loads((Path(__file__).resolve().parents[1] / "langgraph.json").read_text())
+    assert set(config["graphs"]) == {"communicator"}
 
 
 @pytest.mark.asyncio
@@ -58,13 +127,12 @@ async def test_each_model_graph_calls_two_pass_runtime_and_emits_one_protocol(mo
     }
     runtime = SimpleNamespace(run=AsyncMock(return_value=expected))
     monkeypatch.setattr(common, "QwenRunner", lambda: runtime)
-    graph = common.build_agent_graph(agent)
     task = {"task_id": "task-1", "agent": agent}
-    state = await graph.ainvoke({"task": task, "context": {"shared": []}, "cwd": str(tmp_path)})
+    monkeypatch.setattr(communicator_module, "DecisionRunner", Mock(side_effect=AssertionError("Worker must run its own role")))
+    state = await common.build_agent_graph(agent).ainvoke({"task": task, "context": {"shared": []}, "cwd": str(tmp_path)})
     TaskGraphOutput.model_validate(state["result"])
     runtime.run.assert_awaited_once()
     assert runtime.run.call_args.kwargs["task"] == task
-    assert set(graph.get_graph().nodes) == {"__start__", "work", "__end__"}
 
 
 @pytest.mark.asyncio
@@ -77,87 +145,53 @@ async def test_graph_rejects_another_role_before_model_call(monkeypatch, tmp_pat
     runner.assert_not_called()
 
 
-@pytest.mark.asyncio
-async def test_sdk_stream_requires_final_graph_output():
-    async def stream(*args, **kwargs):
-        yield SimpleNamespace(event="values", data={"task": {"task_id": "task-1"}})
-        yield SimpleNamespace(event="custom", data={"type": "qwen_progress", "chunks": 1})
-        yield SimpleNamespace(event="values", data={"result": {"nodes": []}})
-
-    progress = AsyncMock()
-    client = SimpleNamespace(runs=SimpleNamespace(stream=stream))
-    result = await run_graph(client, "EXECUTE", "thread-1", {}, {}, "/tmp", progress)
-    assert result == {"nodes": []}
-    progress.assert_awaited_once()
+async def test_worker_cannot_run_a_task_assigned_to_another_role():
+    with pytest.raises(ValueError, match="worker role"):
+        await run_graph("ANALYZE", {"agent": "EXECUTE"}, {}, "/tmp")
 
 
-@pytest.mark.asyncio
-async def test_worker_waits_for_dispatcher_receipt_and_never_writes_task_state():
+def test_worker_has_no_store_or_sdk_client(tmp_path):
+    worker = Worker("ANALYZE", "analyze-01", Queue(), data_root=tmp_path, workspace=Mock())
+    assert not hasattr(worker, "store")
+    assert not hasattr(worker, "client")
+
+
+async def test_dispatcher_builds_full_chain_context_and_worker_uses_snapshot(monkeypatch, tmp_path):
     store = InMemoryStore()
-    await store.put(("coding", "demo", "responses", "EXECUTE"), "request-1", {"accepted": True, "task": {"task_id": "task-1"}})
-    receipt = await submit_request(store, "demo", "EXECUTE", "execute-01", "claim", request_id="request-1")
-    assert receipt["accepted"]
-    assert await store.get(("coding", "demo", "tasks"), "task-1") is None
-    request = await store.get(("coding", "demo", "requests", "EXECUTE"), "request-1")
-    assert request["kind"] == "claim"
-    assert request["worker_id"] == "execute-01"
-
-
-@pytest.mark.asyncio
-async def test_request_timeout_does_not_issue_another_claim():
-    store = InMemoryStore()
-    with pytest.raises(ReceiptTimeout):
-        await submit_request(store, "demo", "EXECUTE", "execute-01", "claim", timeout=0.01, request_id="pending")
-    assert len(await store.search(("coding", "demo", "requests", "EXECUTE"))) == 1
-
-
-def test_worker_constructs_real_sdk_client_with_auth(monkeypatch, tmp_path):
-    # The SDK reserves x-api-key in headers; api_key= is the supported route.
-    monkeypatch.setenv("ORCHESTRATOR_TOKEN", "unit-test-internal-token")
-    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
-    monkeypatch.setenv("DATA_ROOT", str(tmp_path / "data"))
-    worker = Worker("ANALYZE", "analyze-01")
-    assert worker.client is not None
-    assert worker.store.client is not None
-
-
-@pytest.mark.asyncio
-async def test_repository_free_analysis_gets_isolated_session_and_full_chain_context(monkeypatch, tmp_path):
-    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
-    store = InMemoryStore()
-    current = {"task_id": "analyze-1", "project_id": "demo", "agent": "ANALYZE", "execution_chain_id": "chain-1"}
-    earlier = {"task_id": "prior-1", "project_id": "demo", "agent": "ANALYZE", "execution_chain_id": "chain-1", "status": "DONE"}
+    current = {"task_id": "analyze-1", "project_id": "demo", "agent": "ANALYZE",
+               "execution_chain_id": "chain-1", "attempt": 1}
+    earlier = {"task_id": "prior-1", "project_id": "demo", "agent": "ANALYZE",
+               "execution_chain_id": "chain-1", "status": "DONE"}
     other = {"task_id": "other-1", "project_id": "demo", "execution_chain_id": "chain-2"}
     for task in (current, earlier, other):
         await store.put(("coding", "demo", "tasks"), task["task_id"], task)
-    client = SimpleNamespace(threads=SimpleNamespace(create=AsyncMock(return_value={"thread_id": "thread-1"})))
-    worker = Worker("ANALYZE", "analyze-01", store=store, client=client)
-    worker.request = AsyncMock(return_value={"accepted": True})
+    job = await build_job(store, {"project_id": "demo"}, current, "analyze-01", 3)
     runner = AsyncMock(return_value={"source_result": {"outcome": "SUCCESS"}})
     monkeypatch.setattr("orchestrator.workers.main.run_graph", runner)
-    await worker.execute({"project_id": "demo", "repository_path": None}, current)
-    context = runner.call_args.args[4]
+    worker = Worker("ANALYZE", "analyze-01", Queue(), data_root=tmp_path, workspace=Mock())
+    await worker.execute(job)
+    context = runner.call_args.args[2]
     assert {task["task_id"] for task in context["chain_tasks"]} == {"analyze-1", "prior-1"}
     assert (tmp_path / "sessions" / "demo" / "analyze-1").is_dir()
-    assert current["worktree_path"] == str(tmp_path / "sessions" / "demo" / "analyze-1")
 
 
-@pytest.mark.asyncio
-async def test_verify_integrates_transitive_execute_commits_only():
+async def test_verify_integrates_transitive_execute_commits_from_dispatcher_snapshot():
     store = InMemoryStore()
     execute = {"task_id": "execute-1", "agent": "EXECUTE", "depends_on": [], "commit_sha": "a" * 40}
     verified = {"task_id": "verify-1", "agent": "VERIFY_INTEGRATE", "depends_on": ["execute-1"], "commit_sha": "b" * 40}
-    current = {"task_id": "verify-2", "project_id": "demo", "depends_on": ["verify-1"]}
-    for task in (execute, verified):
+    current = {"task_id": "verify-2", "project_id": "demo", "agent": "VERIFY_INTEGRATE",
+               "execution_chain_id": "chain", "depends_on": ["verify-1"]}
+    for task in (execute, verified, current):
         await store.put(("coding", "demo", "tasks"), task["task_id"], task)
+    job = await build_job(store, {"project_id": "demo", "repository_path": "/repo"}, current, "verify-01", 3)
     manager = SimpleNamespace(
         register=Mock(),
         integrate=Mock(return_value={"status": "SUCCESS", "worktree_path": "/integration", "base_commit": "c" * 40}),
     )
-    worker = Worker("VERIFY_INTEGRATE", "verify_integrate-01", store=store, client=Mock(), workspace=manager)
-    _, dependencies = await worker.prepare({"project_id": "demo", "repository_path": "/repo"}, current)
+    worker = Worker("VERIFY_INTEGRATE", "verify-01", Queue(), workspace=manager)
+    await worker.prepare(job)
     manager.integrate.assert_called_once_with("demo", ["a" * 40])
-    assert [task["task_id"] for task in dependencies] == ["execute-1", "verify-1"]
+    assert [task["task_id"] for task in job["predecessors"]] == ["execute-1", "verify-1"]
 
 
 @pytest.mark.asyncio
@@ -167,8 +201,8 @@ async def test_graph_streams_progress_without_private_log_text(monkeypatch, tmp_
         return {"nodes": []}
 
     monkeypatch.setattr(common, "QwenRunner", lambda: SimpleNamespace(run=run))
-    graph = common.build_agent_graph("ANALYZE")
-    events = [event async for event in graph.astream({"task": {"agent": "ANALYZE"}, "cwd": str(tmp_path)}, stream_mode="custom")]
+    events = []
+    await run_graph("ANALYZE", {"agent": "ANALYZE"}, {}, str(tmp_path), events.append)
     assert events[0]["chunks"] == 1
     assert events[0]["phase"] == "work"
     assert "PRIVATE_SCRATCHPAD" not in str(events)

@@ -2,16 +2,28 @@
 
 import pytest
 from fastapi.testclient import TestClient
+from uuid import uuid4
 
 from orchestrator.store import InMemoryStore
-from orchestrator.web import app, events, get_store
+from orchestrator.web import app, events, get_dispatcher
+
+
+class DashboardClient(InMemoryStore):
+    def __init__(self):
+        super().__init__()
+        self.submitted = []
+
+    async def submit(self, project_id, kind, payload):
+        request_id = uuid4().hex
+        self.submitted.append({"request_id": request_id, "project_id": project_id, "kind": kind, "payload": payload})
+        return {"request_id": request_id, "status": "submitted"}
 
 
 @pytest.fixture
 def web(monkeypatch):
     monkeypatch.setenv("DASHBOARD_TOKEN", "dashboard-test-token")
-    store = InMemoryStore()
-    app.dependency_overrides[get_store] = lambda: store
+    store = DashboardClient()
+    app.dependency_overrides[get_dispatcher] = lambda: store
     with TestClient(app) as client:
         yield client, store
     app.dependency_overrides.clear()
@@ -60,7 +72,7 @@ async def test_snapshot_never_reads_private_or_exposes_unknown_fields(web):
 
 
 @pytest.mark.asyncio
-async def test_human_actions_only_enqueue_control_requests(web, tmp_path, monkeypatch):
+async def test_human_actions_only_enqueue_unvalidated_proposals(web, tmp_path, monkeypatch):
     client, store = web
     monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
     repository = tmp_path / "repository"
@@ -74,7 +86,7 @@ async def test_human_actions_only_enqueue_control_requests(web, tmp_path, monkey
     await store.put(("coding", "p1", "approvals"), "approval-1", {"approval_id": "approval-1", "status": "PENDING"})
     response = client.post("/api/projects/p1/approvals/approval-1", headers=AUTH, json={"decision": "approve", "answer": "Yes"})
     assert response.status_code == 202
-    requests = await store.search(("coding", "p1", "requests", "COMMUNICATOR"))
+    requests = store.submitted
     assert {request["kind"] for request in requests} == {"register_project", "human_message", "approval"}
     assert all(request["request_id"] for request in requests)
     assert await store.search(("coding", "p1", "tasks")) == []
@@ -110,7 +122,7 @@ async def test_artifacts_only_read_explicitly_shared_records(web):
 
 @pytest.mark.asyncio
 async def test_stream_publishes_only_public_event_projection():
-    store = InMemoryStore()
+    store = DashboardClient()
     await store.put(("coding", "p1", "events"), "e", {"kind": "progress", "message": "Review complete", "raw_logs": "private scratchpad"})
 
     class ConnectedRequest:

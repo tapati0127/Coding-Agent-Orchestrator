@@ -167,8 +167,10 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             assert (integration / "api.txt").read_text() == "api implemented\n"
             assert (integration / "ui.txt").read_text() == "ui implemented\n"
             assert snapshot["notifications"]
-            assert (data / "private" / "fixture" / "COMMUNICATOR").is_dir()
+            assert not (data / "private" / "fixture" / "COMMUNICATOR").exists()
             for task in tasks:
+                if task["agent"] == "COMMUNICATOR":
+                    continue  # Communicator calls ChatOpenAI without a CLI Work pass.
                 runs = list((data / "private" / "fixture" / task["agent"] / task["task_id"]).iterdir())
                 assert len(runs) == 1
                 assert (runs[0] / "work.jsonl").is_file()
@@ -183,11 +185,9 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             patches = sorted((workspace / "artifacts" / "fixture" / "patches").glob("*.patch"))
             assert len(patches) == 3
             preserved_patches = {path: path.read_bytes() for path in patches}
+            # Technical graphs run locally in worker processes, without server threads.
             threads = client.post("/threads/search", headers=trusted, json={"limit": 100}).json()
-            assert len(threads) == 7
-            checkpoint_id = threads[0]["thread_id"]
-            state = client.get(f"/threads/{checkpoint_id}/state", headers=trusted).json()
-            assert state["values"]["result"]["source_task_id"] in {task["task_id"] for task in tasks}
+            assert threads == []
             task_ids = {task["task_id"] for task in tasks}
         assert process.returncode == 0, first_log.read_text()[-6000:]
         # A fresh supervisor and Agent Server instance reattach the same data
@@ -200,8 +200,6 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
                                 description="restored Store snapshot", process=restarted, logfile=restart_log)
             assert {task["task_id"] for task in restored["tasks"]} == task_ids
             assert all(task["status"] == "CLOSED" for task in restored["tasks"])
-            restored_state = client.get(f"/threads/{checkpoint_id}/state", headers=trusted).json()
-            assert restored_state["values"]["result"] == state["values"]["result"]
             assert (integration / "api.txt").read_text() == "api implemented\n"
             assert (integration / "ui.txt").read_text() == "ui implemented\n"
             assert all(path.read_bytes() == content for path, content in preserved_patches.items())
