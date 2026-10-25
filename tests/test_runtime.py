@@ -382,3 +382,54 @@ async def test_analyze_invalid_route_repairs_are_bounded_and_release_slot(tmp_pa
     fake_cli(tmp_path, "import json\nprint(json.dumps({'type':'result', 'result':'ok', 'structured_result':" + repr(valid) + "}))\n")
     result = await asyncio.wait_for(qwen.run(source_task("ANALYZE"), {}, str(tmp_path)), timeout=5)
     assert result["nodes"][0]["target_agent"] == "PLAN_DELEGATE"
+
+
+@pytest.mark.parametrize("agent", ["ANALYZE", "PLAN_DELEGATE", "EXECUTE", "VERIFY_INTEGRATE", "FINALIZE", "COMMUNICATOR"])
+async def test_skills_and_gitlab_credentials_are_work_only_and_role_scoped(tmp_path, monkeypatch, agent):
+    monkeypatch.delenv("WORK_PASS_SKILLS_CONFIG", raising=False)
+    monkeypatch.setenv("GITLAB_TOKEN", "glpat-fixture-private-value")
+    monkeypatch.setenv("GITLAB_HOST", "gitlab.example.invalid")
+    monkeypatch.setenv("ORCHESTRATOR_TOKEN", "runtime-secret-never-forward")
+    output = {**result_graph(), "producer_agent": agent}
+    executable = fake_cli(tmp_path, '''import json, os, sys
+prompt = sys.argv[sys.argv.index('--prompt') + 1]
+assert 'glpat-fixture-private-value' not in prompt
+assert 'ORCHESTRATOR_TOKEN' not in os.environ
+is_work = '--json-schema' not in sys.argv
+is_analyze = ''' + repr(agent == "ANALYZE") + '''
+if is_work and is_analyze:
+    assert '<work-skill name="gitlab-cli">' in prompt
+    assert 'glab api --method GET' in prompt
+    assert os.environ['GITLAB_HOST'] == 'gitlab.example.invalid'
+    assert os.environ['GITLAB_TOKEN'] == 'glpat-fixture-private-value'
+    # Exercise redaction of subprocess output and the Work result passed onward.
+    print(json.dumps({'type':'assistant', 'text':os.environ['GITLAB_TOKEN']}))
+    print(json.dumps({'type':'result', 'result':os.environ['GITLAB_TOKEN']}))
+else:
+    assert '<work-skill name="gitlab-cli">' not in prompt
+    assert 'GITLAB_TOKEN' not in os.environ and 'GITLAB_HOST' not in os.environ
+    print(json.dumps({'type':'result', 'result':'done', 'structured_result': ''' + repr(output) + '''}))
+''')
+    qwen = runner(tmp_path, executable)
+    await qwen.run(source_task(agent), {}, str(tmp_path))
+    assert qwen.last_run["work_skills"] == (["gitlab-cli"] if agent == "ANALYZE" else [])
+    logs = "".join(path.read_text() for path in Path(qwen.last_run["private_log_dir"]).glob("*.jsonl"))
+    assert "glpat-fixture-private-value" not in logs
+    if agent == "ANALYZE":
+        assert "[REDACTED]" in logs
+
+
+async def test_runtime_uses_config_override_only_for_work_prompt(tmp_path, monkeypatch):
+    skill = tmp_path / "custom.md"
+    skill.write_text("ROLE_SPECIFIC_SKILL_MARKER")
+    config = tmp_path / "skills.json"
+    config.write_text(json.dumps({"version": 1, "skills": {"custom": "custom.md"},
+                                 "agents": {"EXECUTE": ["custom"]}}))
+    executable = fake_cli(tmp_path, '''import json, sys
+prompt = sys.argv[sys.argv.index('--prompt') + 1]
+assert ('ROLE_SPECIFIC_SKILL_MARKER' in prompt) == ('--json-schema' not in sys.argv)
+print(json.dumps({'type':'result', 'result':'done', 'structured_result': ''' + repr(result_graph()) + '''}))
+''')
+    qwen = runner(tmp_path, executable, skills_config=config)
+    await qwen.run(source_task(), {}, str(tmp_path))
+    assert qwen.last_run["work_skills"] == ["custom"]

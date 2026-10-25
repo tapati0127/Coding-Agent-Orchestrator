@@ -76,11 +76,46 @@ tốn backward budget. Nếu vẫn sai, lượt chạy báo lỗi để xử lý
 
 ## Cấu hình
 
+Skills của từng Work pass được khai báo trong [config/work_pass_skills.json](config/work_pass_skills.json).
+Mặc định `ANALYZE` dùng `gitlab-cli`; các role khác có danh sách rỗng. Thêm skill
+bằng cách khai báo đường dẫn `SKILL.md` trong `skills` rồi gán tên đó vào `agents`:
+
+```json
+{
+  "version": 1,
+  "skills": {"gitlab-cli": "../skills/gitlab-cli/SKILL.md"},
+  "agents": {"ANALYZE": ["gitlab-cli"], "EXECUTE": []}
+}
+```
+
+Đường dẫn skill tương đối được tính từ thư mục chứa config; role không được khai
+báo tương đương danh sách rỗng. Có thể đặt `WORK_PASS_SKILLS_CONFIG` tới config riêng
+(mount cả config và các skill vào container nếu dùng Docker). Runtime đọc config
+cho mỗi lượt chạy; skill thiếu/sai cấu hình báo lỗi thay vì bỏ qua âm thầm.
+
+Orchestrator nạp nội dung skill trực tiếp vào **Work prompt**, giữ Qwen `--safe-mode`;
+đây không phải native skill discovery của Qwen. Decision pass chỉ nhận role prompt,
+task/context và kết quả Work pass, không được nạp bộ skill hay nhận GitLab credentials.
+Theo [tài liệu Qwen](https://github.com/QwenLM/qwen-code/blob/main/docs/users/support/troubleshooting.md),
+safe mode vô hiệu hóa cơ chế custom skills tự động.
+
+[Skill GitLab CLI](skills/gitlab-cli/SKILL.md) hướng dẫn Analyze đọc issue, MR, diff
+và CI evidence qua `glab`, không thực hiện thay đổi GitLab. Dockerfile lấy binary
+`glab` từ image chính thức phiên bản `v1.95.0`; khi chạy local cần cài `glab` trên PATH
+(ví dụ `brew install glab` trên macOS). Đặt `GITLAB_HOST` cho instance cần truy cập và
+`GITLAB_TOKEN` khi cần xác thực; runtime chỉ truyền chúng cho Work pass được gán
+skill `gitlab-cli`, không đọc credential config từ HOME của người chạy. Cách xác thực
+bằng biến môi trường được mô tả trong [tài liệu GitLab](https://docs.gitlab.com/cli/auth/login/).
+Skill là hướng dẫn sử dụng, không thay đổi `yolo` hay khóa shell thành read-only;
+quyền truy cập GitLab còn phụ thuộc token được cấp.
+
 | Biến | Ý nghĩa |
 | --- | --- |
 | `ORCHESTRATOR_TOKEN` | Token nội bộ cho Store/graph SDK; không phát cho browser |
 | `DASHBOARD_TOKEN` | Token riêng cho API giao diện |
 | `QWEN_BASE_URL`, `QWEN_API_KEY`, `QWEN_MODEL` | Endpoint/model OpenAI-compatible cho Qwen Code |
+| `WORK_PASS_SKILLS_CONFIG` | Đường dẫn config skills riêng; bỏ trống để dùng config đi kèm |
+| `GITLAB_HOST`, `GITLAB_TOKEN` | Host/token GitLab cho Work pass được gán skill `gitlab-cli` |
 | `MAX_EXECUTE_WORKERS` | 1–5 Execute workers |
 | `MAX_QWEN_SESSIONS` | 1–5 phiên Qwen đồng thời trên Agent Server |
 | `MAX_BACKWARD_DELEGATIONS` | Tối đa 3 lần quay ngược trên execution chain |

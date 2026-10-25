@@ -30,3 +30,5 @@ asyncio_mode = "auto"
 [tool.hatch.build.targets.wheel.force-include]
 "prompts" = "orchestrator/prompts"
 "dashboard" = "orchestrator/dashboard"
+"config" = "orchestrator/config"
+"skills" = "orchestrator/skills"

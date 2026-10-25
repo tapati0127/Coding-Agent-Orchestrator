@@ -14,6 +14,14 @@ Communicator dùng `backward_count` chung khi tự giao hoặc hỏi human, khô
 
 ## HTTP và quyền
 
+Work pass có bộ skills riêng theo `config/work_pass_skills.json` (override bằng
+`WORK_PASS_SKILLS_CONFIG`). Runtime nạp các file SKILL.md đã cấu hình vào prompt
+trong thread chuẩn bị, không nạp từ task/model output và không tắt Qwen safe mode.
+GitLab credentials chỉ vào subprocess Work có skill `gitlab-cli`; Decision pass
+và các lần sửa quyết định dùng HOME riêng, không nhận skill/env của Work. Lịch sử
+Qwen, config và credential cache của từng pass nằm trong thư mục riêng của pass.
+Skill không thay thế quyền công cụ, sandbox hoặc quyền token GitLab.
+
 Agent Server phục vụ cả `/dashboard` và API giao diện `/api/*`. Built-in Store/thread/run API dùng ORCHESTRATOR_TOKEN. API giao diện dùng DASHBOARD_TOKEN khác, chỉ cung cấp projection công khai và enqueue yêu cầu người dùng. Không có endpoint giao diện nào cho browser ghi task/plan authoritative.
 
 Không bật custom-route auth mặc định của Agent Server cho `/api/*`, vì các route này kiểm tra dashboard token riêng. CORS mặc định cùng origin. Không đưa token vào URL hoặc gửi private scratchpad/raw Qwen logs lên browser. Dashboard stream tiến độ công khai, không stream scratchpad hay raw subprocess output. Patch/report content chỉ hiển thị qua shared artifact references đã được Dispatcher chấp nhận và kiểm tra scope; file trên disk không tự động thành tài liệu public. Shared promotion là đề xuất phải được Dispatcher kiểm tra.

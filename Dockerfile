@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 FROM node:22.20.0-bookworm-slim AS node
 FROM ghcr.io/astral-sh/uv:0.12.23 AS uv
+FROM registry.gitlab.com/gitlab-org/cli:v1.95.0 AS glab
 FROM python:3.12.12-slim-bookworm
 
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
@@ -8,6 +9,7 @@ COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 COPY --from=uv /uv /usr/local/bin/uv
+COPY --from=glab /usr/bin/glab /usr/local/bin/glab
 RUN --mount=type=secret,id=proxy_ca \
     if [ -f /run/secrets/proxy_ca ]; then \
       cp /run/secrets/proxy_ca /usr/local/share/ca-certificates/build-proxy.crt; \
@@ -27,6 +29,8 @@ COPY pyproject.toml uv.lock ./
 COPY src ./src
 COPY prompts ./prompts
 COPY dashboard ./dashboard
+COPY config ./config
+COPY skills ./skills
 RUN uv sync --frozen --no-dev
 COPY langgraph.json ./
 RUN mkdir -p /workspace /data

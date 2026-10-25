@@ -527,3 +527,20 @@ async def test_analyze_can_delegate_to_each_allowed_role(target):
     assert receipt["accepted"]
     tasks = await dispatcher.tasks(PROJECT)
     assert tasks[receipt["task_ids"][0]].agent == target
+
+
+async def test_gitlab_token_cannot_be_promoted_and_is_redacted_in_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setenv("GITLAB_TOKEN", "glpat-test-secret-value")
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+    store, dispatcher = await setup_dispatcher(clock=lambda: 1000.)
+    source = await active(store)
+    output = proposal(source, shared_updates=[{"key": "gitlab-report", "value": "glpat-test-secret-value", "reason": "Share findings"}])
+    assert not (await dispatcher.handle(envelope("result", source, output)))["accepted"]
+    artifact_dir = tmp_path / "artifacts" / PROJECT / "reports"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "analysis.txt").write_text("glpat-test-secret-value")
+    output = proposal(source)
+    output["source_result"]["artifact_refs"] = [f"artifact://{PROJECT}/reports/analysis.txt"]
+    assert (await dispatcher.handle(envelope("result", source, output)))["accepted"]
+    artifact = await store.get(("coding", PROJECT, "shared", "artifacts"), f"{PROJECT}/reports/analysis.txt")
+    assert artifact["content"] == "[REDACTED]"
