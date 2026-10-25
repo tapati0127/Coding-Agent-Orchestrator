@@ -1,0 +1,20 @@
+services:
+  orchestrator:
+    build: .
+    ports:
+      - "127.0.0.1:2024:2024"
+    env_file:
+      - .env
+    environment:
+      WORKSPACE_ROOT: /workspace
+      DATA_ROOT: /data
+      LANGGRAPH_URL: http://127.0.0.1:2024
+    volumes:
+      - orchestrator-workspace:/workspace
+      - orchestrator-data:/data
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+volumes:
+  orchestrator-workspace:
+  orchestrator-data:

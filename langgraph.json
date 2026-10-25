@@ -1,0 +1,13 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "communicator": "./src/orchestrator/graphs/communicator.py:graph",
+    "analyze": "./src/orchestrator/graphs/analyze.py:graph",
+    "plan_delegate": "./src/orchestrator/graphs/plan_delegate.py:graph",
+    "execute": "./src/orchestrator/graphs/execute.py:graph",
+    "verify_integrate": "./src/orchestrator/graphs/verify_integrate.py:graph",
+    "finalize": "./src/orchestrator/graphs/finalize.py:graph"
+  },
+  "http": {"app": "./src/orchestrator/web.py:app", "enable_custom_route_auth": false},
+  "auth": {"path": "./src/orchestrator/auth.py:auth"}
+}
