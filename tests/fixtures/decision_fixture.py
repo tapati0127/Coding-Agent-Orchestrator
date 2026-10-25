@@ -18,6 +18,15 @@ def decision_endpoint():
         def do_POST(self):
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             requests.append(request)
+            # Match the strict role ordering used by the production template.
+            if any(message["role"] in {"system", "developer"} for message in request["messages"][1:]):
+                data = json.dumps({"error": {"message": "System message must be at the beginning."}}).encode()
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if request.get("stream"):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")

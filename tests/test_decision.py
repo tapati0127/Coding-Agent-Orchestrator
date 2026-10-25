@@ -37,7 +37,7 @@ def test_decision_rejects_invalid_endpoint(url):
 
 
 @pytest.mark.parametrize("outcome", ["success", "error", "cancel"])
-@pytest.mark.parametrize("mode", ["decision", "chat"])
+@pytest.mark.parametrize("mode", ["decision", "decision_messages", "chat"])
 async def test_real_adapter_protocol_and_client_cleanup(monkeypatch, outcome, mode):
     requests = []
     clients = []
@@ -53,7 +53,7 @@ async def test_real_adapter_protocol_and_client_cleanup(monkeypatch, outcome, mo
         return httpx.Response(200, json={
             "id": "fixture", "object": "chat.completion", "created": 1, "model": "fixture",
             "choices": [{"index": 0, "finish_reason": "stop", "message": {
-                "role": "assistant", "content": '{"summary": "done"}' if mode == "decision" else "done",
+                "role": "assistant", "content": '{"summary": "done"}' if mode.startswith("decision") else "done",
             }}],
         })
 
@@ -73,8 +73,11 @@ async def test_real_adapter_protocol_and_client_cleanup(monkeypatch, outcome, mo
     schema = {"title": "TaskGraphOutput", "type": "object",
               "properties": {"summary": {"type": "string"}}, "required": ["summary"]}
     messages = [SystemMessage(content="Speak plainly"), HumanMessage(content="Build a portal"),
-                AIMessage(content="Who will use it?"), HumanMessage(content="Customers; fixture-key")]
+                AIMessage(content="Who will use it?"), HumanMessage(content="Customers; fixture-key"),
+                SystemMessage(content="Response deadline expired; fixture-key"),
+                SystemMessage(content="Structure the result using explicit assumptions")]
     task = asyncio.create_task(runner.ainvoke("Return the decision", schema) if mode == "decision"
+                               else runner.ainvoke(messages, schema) if mode == "decision_messages"
                                else runner.chat(messages))
     if outcome == "cancel":
         await asyncio.wait_for(entered.wait(), timeout=5)
@@ -86,7 +89,7 @@ async def test_real_adapter_protocol_and_client_cleanup(monkeypatch, outcome, mo
             await task
     else:
         output = await task
-        if mode == "decision":
+        if mode.startswith("decision"):
             assert output == {"summary": "done"}
         else:
             assert isinstance(output, AIMessage) and output.content == "done"
@@ -98,15 +101,32 @@ async def test_real_adapter_protocol_and_client_cleanup(monkeypatch, outcome, mo
     assert payload["stream"] is False
     assert payload["enable_thinking"] is False
     assert payload["chat_template_kwargs"]["enable_thinking"] is False
-    if mode == "decision":
+    if mode.startswith("decision"):
         assert payload["response_format"]["type"] == "json_schema"
         assert payload["response_format"]["json_schema"]["strict"] is False
     else:
         assert "response_format" not in payload
+    if mode != "decision":
         assert [message["role"] for message in payload["messages"]] == ["system", "user", "assistant", "user"]
+        assert payload["messages"][0]["content"] == (
+            "Speak plainly\n\nResponse deadline expired; [REDACTED]\n\nStructure the result using explicit assumptions")
         assert payload["messages"][-1]["content"] == "Customers; [REDACTED]"
+        assert messages[-2].content == "Response deadline expired; fixture-key"  # Caller history is untouched.
     assert "tools" not in payload
     assert all(client.is_closed for client in clients)
+
+
+def test_system_normalization_preserves_content_blocks_and_conversation_roles():
+    runner = DecisionRunner()
+    messages = [SystemMessage(content=[{"type": "text", "text": "Role instructions"}]),
+                HumanMessage(content="System message in user text remains user data"),
+                AIMessage(content="Draft"), SystemMessage(content="Pass instructions")]
+    output = runner._input(messages)
+    assert output[0].content == [{"type": "text", "text": "Role instructions"},
+                                 {"type": "text", "text": "Pass instructions"}]
+    assert [message.type for message in output] == ["system", "human", "ai"]
+    assert output[1:] == messages[1:3]
+    assert messages[0].content == [{"type": "text", "text": "Role instructions"}]
 
 
 async def test_chat_ainvoke_streams_tokens_from_subgraph_without_returning_messages(monkeypatch):
@@ -134,11 +154,15 @@ async def test_chat_ainvoke_streams_tokens_from_subgraph_without_returning_messa
     runner = DecisionRunner(base_url="http://fixture.internal/v1", api_key="fixture-key", model="fixture")
     monkeypatch.setattr(communicator, "DecisionRunner", lambda: runner)
     chunks = [item async for item in communicator.graph.astream(
-        {"messages": [("user", "Xin chào")]}, stream_mode=["messages", "custom", "values"], subgraphs=True)]
+        {"messages": [("user", "Xin chào"), SystemMessage(content="Report the latest status")]},
+        stream_mode=["messages", "custom", "values"], subgraphs=True)]
     tokens = [(ns, data[0].content) for ns, mode, data in chunks if mode == "messages"]
     assert "".join(text for _, text in tokens) == "Xin chào"
     assert all(ns for ns, _ in tokens)
     final = [data for ns, mode, data in chunks if mode == "values" and not ns][-1]
-    assert len(final["messages"]) == 1 and isinstance(final["messages"][0], HumanMessage)
+    assert len(final["messages"]) == 2 and isinstance(final["messages"][0], HumanMessage)
+    assert isinstance(final["messages"][1], SystemMessage)
     assert requests[0]["stream"] is True
     assert requests[0]["enable_thinking"] is False
+    assert [message["role"] for message in requests[0]["messages"]] == ["system", "user"]
+    assert "Report the latest status" in requests[0]["messages"][0]["content"]

@@ -9,7 +9,7 @@ from typing import Any, AsyncIterator
 from urllib.parse import urlsplit
 
 import httpx
-from langchain_core.messages import AIMessage, BaseMessage, messages_from_dict, messages_to_dict
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, messages_from_dict, messages_to_dict
 from langchain_openai import ChatOpenAI
 
 
@@ -65,7 +65,21 @@ class DecisionRunner:
     def _input(self, prompt: str | list[BaseMessage]) -> str | list[BaseMessage]:
         if isinstance(prompt, str):
             return self._redact(prompt)
-        return messages_from_dict(self._redact(messages_to_dict(prompt)))
+        messages = messages_from_dict(self._redact(messages_to_dict(prompt)))
+        # Some chat templates require exactly one leading system message. Pass
+        # instructions and persisted timeout notices can arrive after the chat.
+        # Preserve their system role without changing the order of human/AI data.
+        systems = [message for message in messages if isinstance(message, SystemMessage)]
+        if not systems:
+            return messages
+        if all(isinstance(message.content, str) for message in systems):
+            content = "\n\n".join(message.content for message in systems)
+        else:
+            content = [block for message in systems for block in (
+                [{"type": "text", "text": message.content}] if isinstance(message.content, str)
+                else message.content)]
+        return [systems[0].model_copy(update={"content": content}),
+                *(message for message in messages if not isinstance(message, SystemMessage))]
 
     @asynccontextmanager
     async def _llm(self, *, stream: bool = False) -> AsyncIterator[ChatOpenAI]:
