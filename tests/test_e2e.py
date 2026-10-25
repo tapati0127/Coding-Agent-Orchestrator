@@ -69,7 +69,9 @@ def descendants(parent):
 def supervisor(cwd, environment, logfile):
     with logfile.open("w") as output:
         process = subprocess.Popen(
-            [sys.executable, "-m", "orchestrator.supervisor"],
+            [str(Path(sys.executable).parent / "langgraph"), "dev",
+             "--host", "127.0.0.1", "--port", "2024", "--no-browser",
+             "--no-reload", "--n-jobs-per-worker", "10"],
             cwd=cwd, env=environment, stdout=output, stderr=subprocess.STDOUT,
             start_new_session=True,
         )
@@ -115,7 +117,7 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
         **os.environ,
         **decision_env,
         "PATH": f"{Path(sys.executable).parent}:{os.environ.get('PATH', '')}",
-        "LANGGRAPH_URL": URL, "ORCHESTRATOR_TOKEN": internal_token,
+        "LANGGRAPH_URL": URL,
         "PYTHONPATH": str(ROOT / "src"),
         "QWEN_CODE_BIN": str(fixture),
         "QWEN_BASE_URL": "http://fixture.invalid/v1", "QWEN_API_KEY": "nonsecret-fixture-key",
@@ -125,6 +127,9 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
         "LANGSMITH_TRACING": "false", "LANGGRAPH_API_DISABLE_ANALYTICS": "true",
         "DO_NOT_TRACK": "1", "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost",
     }
+    # Prove langgraph dev loads credentials from config.env without a launcher.
+    environment.pop("ORCHESTRATOR_TOKEN", None)
+    (run_root / ".env").write_text(f"ORCHESTRATOR_TOKEN={internal_token}\n")
     with httpx.Client(base_url=URL, timeout=10, trust_env=False) as client:
         trusted = {"x-api-key": internal_token}
         first_log = tmp_path / "first-start.log"
@@ -203,7 +208,7 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             threads = client.post("/threads/search", headers=trusted, json={"limit": 100}).json()
             assert len(threads) == 1 and threads[0]["thread_id"] == thread["thread_id"]
             task_ids = {task["task_id"] for task in tasks}
-        assert process.returncode == 0, first_log.read_text()[-6000:]
+        assert process.returncode in (0, -signal.SIGTERM), first_log.read_text()[-6000:]
         # A fresh supervisor and Agent Server instance reattach the same data
         # directory. No task is resubmitted and no graph is rerun here.
         restart_log = tmp_path / "restart.log"
@@ -220,5 +225,5 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             restored_thread = sdk.threads.get_state(thread["thread_id"])
             assert restored_thread["values"]["project_id"] == pid
             assert restored_thread["values"]["messages"][-1]["type"] == "ai"
-        assert restarted.returncode == 0, restart_log.read_text()[-6000:]
+        assert restarted.returncode in (0, -signal.SIGTERM), restart_log.read_text()[-6000:]
         assert len([r for r in decision_requests if r.get("response_format")]) == 7

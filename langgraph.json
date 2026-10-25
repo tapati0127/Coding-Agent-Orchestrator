@@ -1,8 +1,15 @@
 {
-  "dependencies": ["."],
+  "dependencies": [
+    "."
+  ],
   "graphs": {
     "communicator": "./graph.py:graph"
   },
-  "http": {"app": "./src/orchestrator/server.py:app"},
-  "auth": {"path": "./src/orchestrator/auth.py:auth"}
+  "http": {
+    "app": "./src/orchestrator/server.py:app"
+  },
+  "auth": {
+    "path": "./src/orchestrator/auth.py:auth"
+  },
+  "env": ".env"
 }

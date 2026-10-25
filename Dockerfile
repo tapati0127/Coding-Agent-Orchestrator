@@ -32,10 +32,11 @@ COPY config ./config
 COPY skills ./skills
 RUN uv sync --frozen --no-dev
 COPY langgraph.json graph.py ./
-RUN mkdir -p /workspace /data
+RUN mkdir -p /workspace /data/langgraph \
+    && ln -s /data/langgraph /app/.langgraph_api
 VOLUME ["/workspace", "/data"]
 EXPOSE 2024
 HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=5 \
     CMD python -c "import os,urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:2024/ok', headers={'x-api-key':os.environ.get('ORCHESTRATOR_TOKEN','')}), timeout=3)"
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["python", "graph.py"]
+CMD ["langgraph", "dev", "--host", "0.0.0.0", "--port", "2024", "--no-browser", "--no-reload", "--n-jobs-per-worker", "10"]

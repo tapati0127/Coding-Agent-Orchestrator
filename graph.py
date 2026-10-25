@@ -212,8 +212,3 @@ async def graph_lifespan(runtime, settings):
         yield application
     finally:
         await application.stop()
-
-
-if __name__ == "__main__":
-    from orchestrator.supervisor import main
-    main()

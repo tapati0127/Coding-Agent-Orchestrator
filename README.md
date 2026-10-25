@@ -30,17 +30,16 @@ uv sync --frozen
 npm install --global @qwen-code/qwen-code@0.26.1
 cp .env.example .env
 # Cấu hình .env; dùng DATA_ROOT và WORKSPACE_ROOT có quyền ghi.
-set -a
-. ./.env
-set +a
-uv run python graph.py
+uv run langgraph dev --host 0.0.0.0 --port 2024 --no-browser --no-reload --n-jobs-per-worker 10
 ```
 
-`graph.py` là entrypoint ngoài cùng. Launcher chuẩn bị persistence rồi gọi trực tiếp CLI Python chạy
-`langgraph dev --host 0.0.0.0 --port 2024 --no-browser --no-reload --n-jobs-per-worker 10`
-ở foreground. Communicator chạy trong process chính của Agent Server; lifecycle trong
-`graph.py` tạo queue và khởi động Dispatcher cùng các agent kỹ thuật ở process riêng.
-Dừng bằng SIGTERM/Ctrl-C để lưu trạng thái phát triển và kết thúc theo thứ tự.
+Chỉ cần chạy `langgraph dev` từ thư mục gốc (hoặc `uv run langgraph dev` nếu chưa
+activate virtualenv). `langgraph.json` tự nạp `.env`, expose graph Communicator từ
+`graph.py` và gắn lifecycle khởi động queue, Dispatcher cùng các process agent.
+Communicator chạy trong process chính của Agent Server; Dispatcher và các agent
+kỹ thuật chạy ở process riêng. Không cần khởi động launcher trước.
+Dùng `--no-reload` để giữ ổn định các process con trong lúc chạy task.
+Dừng bằng SIGTERM/Ctrl-C để kết thúc theo thứ tự.
 
 ```bash
 uv run pytest -q
@@ -179,7 +178,7 @@ HTTPX/ChatOpenAI đọc `SSL_CERT_FILE`; Qwen Code dùng `NODE_EXTRA_CA_CERTS`.
 QwenRunner đổi đường dẫn CA tương đối thành tuyệt đối trước khi chạy trong
 worktree khác. Compose mount `.local/certs` vào `/app/.local/certs` ở chế độ chỉ
 đọc. Bundle là cấu hình local, đã được gitignore; cần tạo file trên máy chạy.
-Khởi động lại Supervisor/container sau khi đổi biến CA.
+Khởi động lại `langgraph dev`/container sau khi đổi biến CA.
 
 Thinking được tắt cho cả hai pass. ChatOpenAI gửi `enable_thinking=false` và
 `chat_template_kwargs.enable_thinking=false` qua `extra_body`. Qwen Code nhận

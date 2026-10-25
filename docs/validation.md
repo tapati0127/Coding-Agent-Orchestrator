@@ -2,6 +2,14 @@
 
 Tài liệu này phân biệt kiểm thử runtime thực với mô hình được giả lập. Kết quả phản ánh môi trường phát triển hiện tại; không suy ra độ bền sản xuất của `langgraph dev` hoặc chất lượng mô hình nội bộ.
 
+## Khởi chạy trực tiếp bằng LangGraph CLI
+
+- `RUN_SERVER_TESTS=1 .venv/bin/pytest tests/test_e2e.py tests/test_server.py -q`:
+  **2 passed**. Smoke gọi trực tiếp `langgraph dev`, nạp token từ `.env` thông qua
+  `langgraph.json`, xử lý bảy task CLOSED và kiểm tra graceful restart giữ dữ liệu.
+- Docker và live smoke script dùng cùng đường khởi chạy; chưa build lại Docker
+  hoặc chạy smoke với model thật cho thay đổi này.
+
 ## Kiến trúc queue/process trong graph.py
 
 - `RUN_SERVER_TESTS=1 .venv/bin/pytest -q`: **234 passed, 1 skipped**.

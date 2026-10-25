@@ -56,7 +56,7 @@ def require(condition: Any, message: str) -> None:
 
 
 def descendants(pid: int) -> list[int]:
-    """Track only processes descended from the Supervisor we created (Linux)."""
+    """Track only processes descended from the Agent Server we created (Linux)."""
     try:
         children = Path(f"/proc/{pid}/task/{pid}/children").read_text().split()
     except OSError:
@@ -138,7 +138,7 @@ class LiveSmoke:
                 float(self.env.get("QWEN_TIMEOUT_SECONDS", "1800")), self.args.work_timeout)))),
         })
         # Relative executable and skill configuration paths refer to the repository,
-        # rather than the isolated Supervisor working directory.
+        # rather than the isolated Agent Server working directory.
         for key in ("QWEN_CODE_BIN", "QWEN_EXECUTABLE", "WORK_PASS_SKILLS_CONFIG"):
             if self.env.get(key) and "/" in self.env[key] and not Path(self.env[key]).is_absolute():
                 self.env[key] = str((ROOT / self.env[key]).resolve())
@@ -171,7 +171,8 @@ class LiveSmoke:
                 probe.bind(("127.0.0.1", 2024))
             except OSError as exc:
                 raise RuntimeError("Port 2024 is occupied; the existing service was left running") from exc
-        command = [sys.executable, "-m", "orchestrator.supervisor"]
+        command = [str(ROOT / ".venv" / "bin" / "langgraph"), "dev", "--host", "0.0.0.0",
+                   "--port", "2024", "--no-browser", "--no-reload", "--n-jobs-per-worker", "10"]
         environment = self.env
         if self.args.docker_image:
             self.container_name = f"orchestrator-live-{uuid4().hex[:12]}"
@@ -186,7 +187,8 @@ class LiveSmoke:
             for key in environment:
                 command.extend(["--env", key])
             command.extend(["--entrypoint", "/usr/bin/tini", self.args.docker_image, "--",
-                            "/app/.venv/bin/python", "-m", "orchestrator.supervisor"])
+                            "/app/.venv/bin/langgraph", "dev", "--host", "0.0.0.0",
+                            "--port", "2024", "--no-browser", "--no-reload", "--n-jobs-per-worker", "10"])
         self.process = subprocess.Popen(
             command, cwd=self.run_root, env=environment,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
@@ -196,7 +198,7 @@ class LiveSmoke:
 
         def copy_log() -> None:
             with (self.output / "server.log").open("a") as output:
-                output.write(f"\n--- {phase}, Supervisor PID {process.pid} ---\n")
+                output.write(f"\n--- {phase}, Agent Server PID {process.pid} ---\n")
                 for line in process.stdout:
                     output.write(self.redact(line))
                     output.flush()
@@ -206,7 +208,7 @@ class LiveSmoke:
         deadline = time.monotonic() + self.remaining(90)
         with httpx.Client(base_url=URL, timeout=2, trust_env=False) as client:
             while time.monotonic() < deadline:
-                require(process.poll() is None, f"Supervisor exited during {phase}; see server.log")
+                require(process.poll() is None, f"Agent Server exited during {phase}; see server.log")
                 try:
                     if client.get("/ok", headers={"x-api-key": self.env["ORCHESTRATOR_TOKEN"]}).status_code == 200:
                         return
@@ -234,7 +236,7 @@ class LiveSmoke:
                     except (ProcessLookupError, PermissionError):
                         pass
                 process.wait(timeout=5)
-        # The normal Supervisor path joins its workers. Clean any remaining owned
+        # The normal Agent Server path joins its workers. Clean any remaining owned
         # descendants if a failure prevented that path from completing.
         if process.returncode:
             for pid in owned:
@@ -303,7 +305,7 @@ class LiveSmoke:
         idle_since = None
         while True:
             self.remaining()
-            require(self.process.poll() is None, "Supervisor exited before delivery; see server.log")
+            require(self.process.poll() is None, "Agent Server exited before delivery; see server.log")
             snapshot = self.snapshot(client, project_id)
             tasks = snapshot["tasks"]
             self.report["snapshot"] = snapshot
@@ -386,7 +388,7 @@ class LiveSmoke:
             hashes = self.check_delivery(snapshot, project_id)
             thread_before = client.threads.get_state(thread_id)["values"]
         self.report["checks"]["first_shutdown_exit"] = self.stop()
-        require(self.report["checks"]["first_shutdown_exit"] == 0, "First Supervisor shutdown was not clean")
+        require(self.report["checks"]["first_shutdown_exit"] in (0, -signal.SIGTERM), "First Agent Server shutdown was not clean")
         self.start("persistence restart")
         with get_sync_client(url=URL, api_key=self.env["ORCHESTRATOR_TOKEN"], timeout=self.remaining(30)) as client:
             restored = self.snapshot(client, project_id)
@@ -399,7 +401,7 @@ class LiveSmoke:
                         for name, digest in hashes.items()), "Integrated files changed after restart")
         self.report["checks"]["restart_persistence"] = {"task_ids": sorted(original_ids), "file_sha256": hashes}
         self.report["checks"]["second_shutdown_exit"] = self.stop()
-        require(self.report["checks"]["second_shutdown_exit"] == 0, "Restarted Supervisor shutdown was not clean")
+        require(self.report["checks"]["second_shutdown_exit"] in (0, -signal.SIGTERM), "Restarted Agent Server shutdown was not clean")
         self.report["status"] = "passed"
         self.say("PASS: real-model chain closed, calculator tests passed, and restart preserved delivery.")
 

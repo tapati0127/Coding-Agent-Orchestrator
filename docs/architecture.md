@@ -3,8 +3,8 @@
 ## Process và dữ liệu
 
 Entry point là `graph.py` ở root. `langgraph.json` expose `./graph.py:graph`,
-chính là graph Communicator nhận message human. `python graph.py` chuẩn bị
-persistence rồi gọi CLI Python để chạy Agent Server ngay trong process hiện tại. Lifecycle trong
+chính là graph Communicator nhận message human. Chạy trực tiếp `langgraph dev` từ root; cấu hình tự nạp `.env`, không cần
+launcher riêng. Lifecycle trong
 `orchestrator.server` lấy Runtime và gọi `graph_lifespan` của `graph.py`.
 
 `GraphRuntime` khai báo toàn bộ queue bằng `multiprocessing` của Python với start
@@ -88,7 +88,7 @@ Execute workers có worktree riêng theo project/worker; integration có worktre
 
 ## Persistence
 
-Package/runtime và toàn bộ dependency được khóa bằng `uv.lock`; Qwen CLI được pin trong Dockerfile. Runtime `langgraph dev` sử dụng `.langgraph_api` dưới thư mục chạy, được Supervisor nối tới `DATA_ROOT` để snapshot local có thể sống qua việc tạo lại container với cùng volume. Worktrees/artifacts ở volume `WORKSPACE_ROOT`; journal Dispatcher ở `DATA_ROOT`.
+Package/runtime và toàn bộ dependency được khóa bằng `uv.lock`; Qwen CLI được pin trong Dockerfile. Runtime `langgraph dev` sử dụng `.langgraph_api` dưới thư mục chạy, ở thư mục chạy khi dùng local. Docker image nối thư mục này tới `/data/langgraph` để snapshot có thể sống qua việc tạo lại container với cùng volume. Worktrees/artifacts ở volume `WORKSPACE_ROOT`; journal Dispatcher ở `DATA_ROOT`.
 
 Store `put/get/search` không phải multi-record transaction. Journal ghi ý định và replay khi khởi động lại giúp reconcile trong MVP, nhưng không bảo đảm exactly-once hoặc durability như hệ quản trị dữ liệu sản xuất. Không thay đổi expected artifact checksums hay tắt TLS để cài dependencies.
 
