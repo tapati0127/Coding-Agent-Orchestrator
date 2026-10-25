@@ -2,27 +2,29 @@
 <html lang="vi">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Qwen Code · Orchestrator</title>
+  <title>Communicator</title>
   <link rel="stylesheet" href="/dashboard/assets/style.css">
   <script src="/dashboard/assets/app.js" defer></script>
 </head>
 <body>
-  <header><div><span class="eyebrow">MULTI-AGENT WORKSPACE</span><h1>Qwen Code Orchestrator</h1></div><span id="connection" role="status">Chưa kết nối</span></header>
-  <section class="connection panel"><form id="connect"><label>Dashboard token <input id="token" type="password" autocomplete="off" placeholder="Nhập token của dashboard" required></label><button>Kết nối</button></form><p>Token chỉ được giữ trong bộ nhớ của tab này. Dashboard gửi yêu cầu; Dispatcher quyết định và cập nhật task.</p></section>
-  <div id="error" role="alert" hidden></div>
   <main>
-    <aside class="panel"><h2>Dự án</h2><div id="projects"></div><details><summary>Thêm dự án</summary><form id="new-project"><label>ID<input name="project_id" required pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,79}" placeholder="project-001"></label><label>Tên<input name="title" required placeholder="Tên dự án"></label><label>Repository trong container<input name="repository_path" placeholder="/workspace/repositories/project-001"></label><button>Tạo yêu cầu</button></form></details></aside>
-    <div class="workspace">
-      <section class="panel project-head"><div><h2 id="project-title">Chọn hoặc tạo một dự án</h2><p id="project-meta">Theo dõi các agent, dependencies và kết quả tích hợp.</p></div><div id="stats"></div></section>
-      <section class="panel"><div class="section-head"><h2>Task DAG</h2><span>Chọn task để xem chi tiết · kéo ngang để xem toàn bộ DAG</span></div><div id="dag" class="dag" aria-label="Task dependency graph"></div><div id="task-detail" class="detail"><p>Chưa chọn task.</p></div></section>
-      <section class="panel"><h2>Workers & worktrees</h2><div id="workers" class="workers"></div></section>
-      <div class="columns">
-        <section class="panel"><h2>Trao đổi & phê duyệt</h2><div id="conversation" class="conversation"></div><div id="approvals"></div><form id="message"><label>Yêu cầu cho Communicator<textarea name="message" rows="4" required placeholder="Mô tả mục tiêu, tiêu chí nghiệm thu hoặc phản hồi làm rõ…"></textarea></label><button>Gửi yêu cầu</button></form><div id="receipts" aria-live="polite"></div></section>
-        <section class="panel"><h2>Tiến độ & sự kiện</h2><div id="timeline" class="timeline" aria-live="polite"></div></section>
-      </div>
-      <section class="panel"><h2>Review, commits & artifacts</h2><div id="artifacts"></div><pre id="artifact-content" hidden></pre></section>
-    </div>
+    <header><h1>Communicator</h1><span id="connection" role="status">Chưa kết nối</span></header>
+    <form id="connect">
+      <label>Dashboard token<input id="token" type="password" autocomplete="off" required></label>
+      <label>Dự án<select id="project"><option value="">Chat trực tiếp</option></select></label>
+      <button>Kết nối</button><button id="new-chat" type="button">Chat mới</button>
+    </form>
+    <details><summary>Thêm dự án</summary><form id="new-project">
+      <label>ID<input name="project_id" required pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,79}"></label>
+      <label>Tên<input name="title" required></label>
+      <label>Repository<input name="repository_path" placeholder="/workspace/repositories/project"></label>
+      <button>Tạo dự án</button>
+    </form></details>
+    <div id="error" role="alert" hidden></div>
+    <section id="conversation" aria-live="polite" aria-label="Hội thoại"><p id="welcome">Gửi tin nhắn để bắt đầu.</p></section>
+    <form id="message"><label class="composer">Tin nhắn<textarea name="message" rows="3" maxlength="20000" required placeholder="Bạn muốn làm gì?"></textarea></label>
+      <div class="actions"><span id="progress" role="status"></span><button id="stop" type="button" hidden>Dừng theo dõi</button><button id="send" disabled>Gửi</button></div>
+    </form>
   </main>
-  <footer>Một Agent Server · Dispatcher single-writer · tối đa 5 phiên Qwen · Chỉ hiển thị dữ liệu shared đã công bố</footer>
 </body>
 </html>

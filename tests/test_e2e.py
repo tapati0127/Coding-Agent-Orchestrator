@@ -142,8 +142,15 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             }).status_code == 202
             wait_for(lambda: client.get("/api/projects/fixture/snapshot", headers=headers).status_code == 200,
                      description="project registration", process=process, logfile=first_log)
-            assert client.post("/api/projects/fixture/messages", headers=headers,
-                               json={"message": "Build independent API and UI, then integrate and accept both."}).status_code == 202
+            with client.stream("POST", "/api/chat/stream", headers=headers, timeout=60, json={
+                "project_id": "fixture", "messages": [{"id": str(uuid4()), "role": "user",
+                "content": "Build independent API and UI, then integrate and accept both."}],
+            }) as response:
+                assert response.status_code == 200
+                frames = list(response.iter_lines())
+            assert any(line.startswith("event: messages|communicate:") for line in frames), "\n".join(frames)[:10000]
+            assert any('"status": "completed"' in line for line in frames), frames
+            assert any('"type": "reply"' in line for line in frames), frames
 
             def completed():
                 response = client.get("/api/projects/fixture/snapshot", headers=headers)
@@ -157,7 +164,8 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             snapshot = wait_for(completed, timeout=60, description="all seven tasks CLOSED",
                                 process=process, logfile=first_log)
             tasks = snapshot["tasks"]
-            assert len(decision_requests) == 7
+            assert len([r for r in decision_requests if not r.get("stream")]) == 7
+            assert any(r.get("stream") for r in decision_requests)
             execute = [task for task in tasks if task["agent"] == "EXECUTE"]
             assert len({task["assigned_worker"] for task in execute}) == 2
             assert all(task["integrated"] and task["commit_sha"] for task in execute)
@@ -187,7 +195,7 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             preserved_patches = {path: path.read_bytes() for path in patches}
             # Technical graphs run locally in worker processes, without server threads.
             threads = client.post("/threads/search", headers=trusted, json={"limit": 100}).json()
-            assert threads == []
+            assert len(threads) == 1 and threads[0]["metadata"]["dashboard_chat"]
             task_ids = {task["task_id"] for task in tasks}
         assert process.returncode == 0, first_log.read_text()[-6000:]
         # A fresh supervisor and Agent Server instance reattach the same data
@@ -204,4 +212,4 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             assert (integration / "ui.txt").read_text() == "ui implemented\n"
             assert all(path.read_bytes() == content for path, content in preserved_patches.items())
         assert restarted.returncode == 0, restart_log.read_text()[-6000:]
-        assert len(decision_requests) == 7
+        assert len([r for r in decision_requests if not r.get("stream")]) == 7

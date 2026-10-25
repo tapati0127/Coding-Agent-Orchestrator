@@ -3,9 +3,11 @@
 import pytest
 from fastapi.testclient import TestClient
 from uuid import uuid4
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 from orchestrator.store import InMemoryStore
-from orchestrator.web import app, events, get_dispatcher
+from orchestrator.web import app, events, get_dispatcher, get_chat_client
 
 
 class DashboardClient(InMemoryStore):
@@ -187,3 +189,50 @@ async def test_snapshot_shows_human_conversation_and_timeout_but_not_system_mess
         {"type": "human", "content": "Build a portal"}, {"type": "ai", "content": "Who uses it?"}]
     assert "Internal timeout instructions" not in response.text and "hidden" not in response.text
     assert response.json()["approvals"][0]["expires_at"] == 1800
+
+
+def test_chat_sdk_proxy_streams_subgraph_events_without_runtime_token(web):
+    client, _ = web
+    thread_id = str(uuid4())
+
+    async def parts(*args, **kwargs):
+        yield SimpleNamespace(event="messages|communicate:child", data=[{
+            "type": "AIMessageChunk", "id": "reply", "content": "Hello"}, {"langgraph_node": "respond"}])
+        yield SimpleNamespace(event="custom|communicate:child", data={"type": "reply", "content": "Hello"})
+
+    sdk = SimpleNamespace(threads=SimpleNamespace(create=AsyncMock(return_value={"thread_id": thread_id})),
+                          runs=SimpleNamespace(stream=Mock(side_effect=parts)))
+    app.dependency_overrides[get_chat_client] = lambda: sdk
+    response = client.post("/api/chat/stream", headers=AUTH, json={"messages": [
+        {"id": str(uuid4()), "role": "user", "content": "Hi"}]})
+    assert response.status_code == 200
+    assert f'"thread_id": "{thread_id}"' in response.text
+    assert "event: messages|communicate:child" in response.text
+    assert "event: custom|communicate:child" in response.text
+    call = sdk.runs.stream.call_args
+    assert call.args == (thread_id, "communicator")
+    assert call.kwargs["stream_subgraphs"] is True
+    assert call.kwargs["stream_mode"] == ["messages-tuple", "custom"]
+    assert call.kwargs["on_disconnect"] == "cancel"
+    assert "task" not in call.kwargs["input"]
+
+
+def test_chat_cannot_resume_unrelated_thread_or_inject_agent_state(web):
+    client, _ = web
+    sdk = SimpleNamespace(threads=SimpleNamespace(get=AsyncMock(return_value={"metadata": {}})))
+    app.dependency_overrides[get_chat_client] = lambda: sdk
+    data = {"thread_id": str(uuid4()), "messages": [{"id": str(uuid4()), "role": "user", "content": "Hi"}]}
+    assert client.post("/api/chat/stream", headers=AUTH, json=data).status_code == 403
+    assert client.post("/api/chat/stream", headers=AUTH, json={**data, "task": {"agent": "EXECUTE"}}).status_code == 422
+    assert client.post("/api/chat/stream", json=data).status_code == 401
+
+
+def test_custom_app_schema_when_loaded_like_agent_server():
+    import importlib.util
+    from orchestrator import web
+
+    # Agent Server loads custom apps without registering their module in sys.modules.
+    spec = importlib.util.spec_from_file_location("user_router_module", web.__file__)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert "/api/chat/stream" in module.app.openapi()["paths"]

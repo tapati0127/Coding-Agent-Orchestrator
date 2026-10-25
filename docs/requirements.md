@@ -30,7 +30,7 @@
 | **Task Dispatcher** | Duy nhất kiểm tra/claim/schedule/ghi task chính thức, xử lý kết quả, idempotency, rework budget và recovery | Không |
 | **Workspace Manager** | Quản lý repository, per-worker worktree, integration worktree, commit, branch và cleanup | Không |
 | **Supervisor** | Khởi động, kiểm tra health và dừng các process trong một container | Không |
-| **Web Dashboard** | Chat/approval, tiến độ, Task DAG, trạng thái worker, event/log, Git diff/artifact | Không |
+| **Web Dashboard** | Khung chat dùng LangGraph SDK, stream token và subgraph; báo tiến độ trong chat | Không |
 
 **Luồng tổng quát:** `Human ↔ Communicator → Analyze → Plan & Delegate → Execute (song song có điều kiện) → Verify & Integrate → Finalize → Communicator → Human`. Các chuyển hướng ngược phải thông qua Task Dispatcher, không có hard-code thành cạnh LangGraph giữa các graph.
 
@@ -41,15 +41,24 @@
 1. **Pass 1 — Work:** chạy Qwen Code để thực hiện nhiệm vụ chuyên biệt. Plan tạo kế hoạch **bằng ngôn ngữ tự nhiên**; Execute viết/chạy code; Verify thực hiện review/kiểm tra; v.v. Ghi log, kết quả và references đến artifacts.
 2. **Pass 2 — Graph decision:** gọi LangChain `ChatOpenAI.ainvoke()` bất đồng bộ, tắt streaming (`streaming=False`, `disable_streaming=True`, tag `nostream`), để đọc kết quả Pass 1 và sinh **chỉ một `TaskGraphOutput` hợp lệ theo JSON Schema chung**; kể cả không có task mới, vẫn trả graph rỗng cùng outcome và source-task result.
 3. Worker gửi output vào multiprocessing.Queue chung. Dispatcher kiểm tra protocol, quyền, dependencies, transitions, backward budget và idempotency rồi mới ghi graph/task chính thức.
-4. Dispatcher là process ứng dụng duy nhất có Store client. Các agent nhận context đã chuẩn bị qua queue và không tự cập nhật trạng thái task.
+4. Dispatcher là process ứng dụng duy nhất ghi Store. Worker nhận context qua queue; Communicator chat được đọc trực tiếp trạng thái task/approval từ Store để báo tiến độ và không tự cập nhật task.
 
 Dispatcher cấp task cho worker đang rảnh sau khi kiểm tra readiness và capacity.
 Graph xử lý một lượt rồi kết thúc; worker tiếp tục queue.get() đến sentinel shutdown.
 Lease/attempt phục vụ retry; task còn lưu trong Store, queue chỉ nằm trong RAM.
-Phần Communicator đọc tiến độ hoặc hủy task được hoãn; chưa thêm CANCEL.
+Communicator đọc tiến độ đã triển khai; hủy task vẫn hoãn, chưa thêm CANCEL.
 
 
 Communicator gọi ChatOpenAI trực tiếp với prompt riêng và lịch sử `messages`. Chat trực tiếp chỉ cần messages; task Communicator do Dashboard/Dispatcher cấp trả `TaskGraphOutput` sau một lần gọi LLM. API tạo request intake, Dispatcher mở task Communicator. Agent chọn tự giao, hỏi human hoặc giao Analyze; người dùng không cần tương tác trực tiếp với Store. Các worker kỹ thuật chạy nền chờ queue, không chạy nối tiếp ngay trong một lượt chat.
+
+Dashboard gọi graph qua LangGraph SDK proxy với `stream_subgraphs=True` và modes
+`messages-tuple/custom`. Node gọi model bằng `ainvoke`, phát token/reply qua stream,
+không return `messages`. Khi chọn project, Communicator đọc task/approval theo
+execution chain; chỉ gọi model khi snapshot đổi. Stream kết thúc khi chain CLOSED,
+chờ câu trả lời human hoặc không còn task active sau nhiều lần đọc ổn định. Đóng
+stream chỉ dừng theo dõi; task nền tiếp tục. Phản hồi làm rõ dùng `human_reply`,
+đánh dấu câu hỏi `RESOLVED`, không tự phê duyệt thao tác kỹ thuật. Client gửi lại các câu trả lời đã
+hiển thị làm input của lượt tiếp theo với ID ổn định.
 
 Các Qwen Code Work session stream log private; lượt Decision dùng Chat Completions JSON Schema, không gọi CLI hoặc stream token. Cấu hình endpoint/model/API key nội bộ riêng bằng `DECISION_BASE_URL`, `DECISION_MODEL`, `DECISION_API_KEY`; từng biến bỏ trống kế thừa `QWEN_*` tương ứng. Timeout qua `DECISION_TIMEOUT_SECONDS` (mặc định 120 giây). Runtime vẫn kiểm tra schema, danh tính source và hướng giao task trước khi gửi Dispatcher.
 
@@ -232,7 +241,7 @@ Mỗi task chính thức tối thiểu chứa:
 6. Worker invoke graph local, gửi heartbeat/progress metadata và output graph qua queue chung khi hoàn thành.
 7. Reconcile task `DOING` bị orphan, Qwen subprocess bị chết, run thất bại, worktree còn dang dở; cleanup an toàn sau khi giữ artifacts.
 
-**Nguyên tắc single-writer:** worker chỉ gửi message qua queue; chỉ Dispatcher có Store client và ghi dữ liệu chính thức. `request_id` và task IDs do Dispatcher cấp/derive phải idempotent. Store `put/get/search` không được coi là transaction nhiều bản ghi/atomic CAS; Dispatcher phải có nhật ký thao tác có thể replay/reconcile, ghi receipt chỉ sau khi task/graph authoritative đã được áp dụng. Một Dispatcher process duy nhất ngăn tranh chấp claim trong MVP; không tự nhận đạt bảo đảm exactly-once trên mọi crash.
+**Nguyên tắc single-writer:** worker chỉ gửi message qua queue; chỉ Dispatcher ghi dữ liệu chính thức, Communicator chat chỉ đọc trạng thái từ Store. `request_id` và task IDs do Dispatcher cấp/derive phải idempotent. Store `put/get/search` không được coi là transaction nhiều bản ghi/atomic CAS; Dispatcher phải có nhật ký thao tác có thể replay/reconcile, ghi receipt chỉ sau khi task/graph authoritative đã được áp dụng. Một Dispatcher process duy nhất ngăn tranh chấp claim trong MVP; không tự nhận đạt bảo đảm exactly-once trên mọi crash.
 
 **Scheduling:** tối đa 5 phiên Qwen Code chạy **trên toàn hệ thống** tại một thời điểm. Số worker Execute cấu hình 1–5; Analyze/Plan/Verify/Finalize cũng sử dụng các slot Qwen này khi hoạt động. Communicator gọi ChatOpenAI trực tiếp và không chiếm slot Qwen. Giới hạn concurrency của `langgraph dev` phải đủ để không khiến các graph run bị tuần tự ngoài ý muốn. Dùng `asyncio.create_subprocess_exec` (hoặc tương đương) để không block event loop của server.
 
@@ -261,7 +270,11 @@ Mỗi task chính thức tối thiểu chứa:
 
 Communicator sử dụng ChatOpenAI trực tiếp với prompt riêng và lịch sử messages, đứng về phía người dùng, làm rõ mục tiêu và không cần hiểu chi tiết kỹ thuật. Nó có thể giao cho chính nó, human hoặc Analyze qua đề xuất task cho Dispatcher. Hỏi human dùng approval có deadline 30 phút mặc định (`HUMAN_RESPONSE_TIMEOUT_SECONDS`); hết hạn chuyển TIMED_OUT và tiếp tục cùng chain với giả định được thông báo rõ, không coi là phê duyệt. State có messages là list[AnyMessage] dùng add_messages; chỉ Communicator, Analyze và Finalize được cấp lịch sử hội thoại. Các agent còn lại chỉ nhận bản tóm tắt yêu cầu. Khi Finalize xong, phát **notification event** cho Communicator; không tạo một task cuối cùng mà không ai có quyền đóng.
 
-**Web Dashboard tối thiểu** (trong cùng container, không yêu cầu custom orchestration backend): danh sách project/session; chat/approval; màn hình Task DAG tương tác; hiển thị task statuses, dependency blockers, retry/backward counters; trạng thái 5 Execute workers/worktrees; streaming logs; Git commits/diff; event timeline; kết quả review và báo cáo Finalize. Frontend giao tiếp với Agent Server/Store API theo phương án triển khai phù hợp trong mạng nội bộ; không tạo thêm service backend nghiệp vụ. Cần kiểm tra cơ chế xác thực/CORS và không để trình duyệt có quyền ghi trực tiếp namespace authoritative task.
+**Web Dashboard tối thiểu** (trong cùng container): khung chat, chọn/tạo dự án và
+LangGraph SDK proxy tới Communicator, bật stream cả subgraph. Tiến độ hiển thị
+trong chat thay cho DAG, worker cards và timeline. Browser dùng dashboard token,
+không nhận runtime token hoặc quyền ghi namespace authoritative task. Các API
+projection/request cũ được giữ cho tương thích, không dùng để poll giao diện chat.
 
 ## 10. Đóng gói và cấu hình
 
@@ -350,7 +363,7 @@ multi-agent-qwen-orchestrator/
 - [ ] `IN_REVIEW` chỉ cho Verify; `CLOSED` chỉ được tạo bởi hành động hợp lệ từ Finalize qua Dispatcher.
 - [ ] Giao việc ngược lần 1–3 được phép, lần 4 bị chặn và chuyển human; retry crash không tính vào backward count.
 - [ ] Dispatcher phục hồi được task orphan trong giới hạn MVP, không tạo task trùng khi replay cùng request.
-- [ ] Dashboard hiện Task DAG, progress, blocking reasons, Qwen streaming log, approve/reject, review, commits và final report.
+- [ ] Dashboard chat stream token/subgraph qua SDK; Communicator đọc Store và chỉ báo tiến độ mới, không return messages; tự kết thúc khi hoàn tất hoặc cần human.
 - [ ] Có test restart container, khôi phục worktrees/artifacts và nêu rõ mức bảo đảm persistence thực tế của `langgraph dev` đã pin.
 
 ## 13. Tài liệu tham khảo kỹ thuật

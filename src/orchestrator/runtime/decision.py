@@ -68,7 +68,7 @@ class DecisionRunner:
         return messages_from_dict(self._redact(messages_to_dict(prompt)))
 
     @asynccontextmanager
-    async def _llm(self) -> AsyncIterator[ChatOpenAI]:
+    async def _llm(self, *, stream: bool = False) -> AsyncIterator[ChatOpenAI]:
         self.validate_config()
         # SSL setup and SDK initialization can read files. Keep them off the
         # graph event loop, and own both HTTP clients for this invocation.
@@ -83,8 +83,8 @@ class DecisionRunner:
                     model=self.model,
                     timeout=self.timeout,
                     max_retries=0,
-                    streaming=False,
-                    disable_streaming=True,
+                    streaming=stream,
+                    disable_streaming=not stream,
                     use_responses_api=False,
                     extra_body={"enable_thinking": False, "chat_template_kwargs": {"enable_thinking": False}},
                     http_client=sync_client,
@@ -94,10 +94,10 @@ class DecisionRunner:
             finally:
                 await asyncio.to_thread(sync_client.close)
 
-    async def chat(self, messages: list[BaseMessage]) -> AIMessage:
+    async def chat(self, messages: list[BaseMessage], *, stream: bool = False) -> AIMessage:
         """Read conversation messages directly, without a CLI work pass."""
-        async with self._llm() as llm:
-            output = await llm.ainvoke(self._input(messages), config={"tags": ["nostream"]})
+        async with self._llm(stream=stream) as llm:
+            output = await llm.ainvoke(self._input(messages), config={"tags": [] if stream else ["nostream"]})
             return output.model_copy(update={"content": self._redact(output.content)})
 
     async def ainvoke(self, prompt: str | list[BaseMessage], schema: dict) -> dict:

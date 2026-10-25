@@ -1,22 +1,26 @@
-"""Communicator reads messages and calls ChatOpenAI; no Store or technical workers."""
+"""Chat and Store progress streaming; Dispatcher still owns task writes."""
 import asyncio
 from importlib.resources import files
 import json
 from pathlib import Path
 from typing import Annotated
 
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.config import get_stream_writer
 
 from orchestrator.graphs.common import AgentState
 from orchestrator.runtime.decision import DecisionRunner, safe_payload
 from orchestrator.schemas.delegation import decision_schema
 from orchestrator.schemas.task_graph import TaskGraphOutput
+from orchestrator.graphs.progress import follow_progress
 
 
 class CommunicatorState(AgentState, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
+    project_id: str | None
+    execution_chain_id: str | None
 
 
 def _role_prompt() -> str:
@@ -35,8 +39,16 @@ async def communicate(state: CommunicatorState) -> dict:
         raise ValueError("Communicator requires a user message in messages")
     messages = [SystemMessage(content=await asyncio.to_thread(_role_prompt)), *history]
     runtime = DecisionRunner()
+    try:
+        writer = get_stream_writer()
+    except RuntimeError:
+        writer = lambda _: None
     if task is None:
-        return {"messages": [await runtime.chat(messages)]}
+        if state.get("project_id"):
+            return await follow_progress(state, runtime, messages, writer)
+        reply = await runtime.chat(messages, stream=True)
+        writer({"type": "reply", "id": reply.id, "content": reply.content})
+        return {}
 
     # A Dispatcher-owned task needs the shared proposal protocol. Send the
     # conversation as real chat messages, without a Qwen Code work pass.
@@ -49,19 +61,25 @@ async def communicate(state: CommunicatorState) -> dict:
                 "producer_agent": "COMMUNICATOR", "execution_chain_id": task["execution_chain_id"]}
     if any(output[key] != value for key, value in expected.items()):
         raise ValueError("Communicator decision source identity does not match the claimed task")
-    # Checkpoints contain the current turn. The Dispatcher journals accepted
-    # messages in the conversation so later tasks/threads see the same history.
+    # Dispatcher journals accepted replies; this node only streams them.
     human_request = output.get("human_request")
     notification = output.get("notification")
     approval = next((node for node in output.get("nodes", [])
                      if node.get("node_type") == "HUMAN_APPROVAL"), {})
     reply = ((human_request or {}).get("question") or approval.get("description") or approval.get("title")
              or (notification or {}).get("message") or output.get("summary"))
-    return {"result": output, "messages": [AIMessage(content=reply, id=task["task_id"])] if reply else []}
+    if reply:
+        writer({"type": "reply", "id": task["task_id"], "content": reply})
+    return {"result": output}
 
+
+conversation = StateGraph(CommunicatorState)
+conversation.add_node("respond", communicate)
+conversation.add_edge(START, "respond")
+conversation.add_edge("respond", END)
 
 builder = StateGraph(CommunicatorState)
-builder.add_node("communicate", communicate)
+builder.add_node("communicate", conversation.compile())
 builder.add_edge(START, "communicate")
 builder.add_edge("communicate", END)
 graph = builder.compile()

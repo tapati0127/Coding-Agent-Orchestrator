@@ -107,3 +107,38 @@ async def test_real_adapter_protocol_and_client_cleanup(monkeypatch, outcome, mo
         assert payload["messages"][-1]["content"] == "Customers; [REDACTED]"
     assert "tools" not in payload
     assert all(client.is_closed for client in clients)
+
+
+async def test_chat_ainvoke_streams_tokens_from_subgraph_without_returning_messages(monkeypatch):
+    from orchestrator.graphs import communicator
+
+    requests = []
+
+    async def respond(request):
+        requests.append(json.loads(request.content))
+        frames = []
+        for text in ("Xin ", "chào"):
+            frames.append("data: " + json.dumps({"id": "stream-fixture", "object": "chat.completion.chunk",
+                "created": 1, "model": "fixture", "choices": [{"index": 0, "finish_reason": None,
+                "delta": {"role": "assistant", "content": text}}]}) + "\n\n")
+        return httpx.Response(200, headers={"Content-Type": "text/event-stream"},
+                              content=("".join(frames) + "data: [DONE]\n\n").encode())
+
+    original = httpx.AsyncClient
+
+    class AsyncClient(original):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(respond), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", AsyncClient)
+    runner = DecisionRunner(base_url="http://fixture.internal/v1", api_key="fixture-key", model="fixture")
+    monkeypatch.setattr(communicator, "DecisionRunner", lambda: runner)
+    chunks = [item async for item in communicator.graph.astream(
+        {"messages": [("user", "Xin chào")]}, stream_mode=["messages", "custom", "values"], subgraphs=True)]
+    tokens = [(ns, data[0].content) for ns, mode, data in chunks if mode == "messages"]
+    assert "".join(text for _, text in tokens) == "Xin chào"
+    assert all(ns for ns, _ in tokens)
+    final = [data for ns, mode, data in chunks if mode == "values" and not ns][-1]
+    assert len(final["messages"]) == 1 and isinstance(final["messages"][0], HumanMessage)
+    assert requests[0]["stream"] is True
+    assert requests[0]["enable_thinking"] is False

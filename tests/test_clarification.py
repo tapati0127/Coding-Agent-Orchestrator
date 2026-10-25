@@ -71,6 +71,29 @@ async def test_intake_asks_human_then_hands_off_in_same_chain():
     assert analyze["execution_chain_id"] == chain
 
 
+async def test_chat_reply_resolves_question_without_inventing_approval():
+    chat = Conversation()
+    task = await chat.start()
+    assert (await chat.result(task, human_request={"question": "Who will use it?"}))["accepted"]
+    approval = await chat.pending()
+    receipt = await chat.send("human_reply", {"approval_id": approval["approval_id"], "answer": "Our customers"})
+    assert receipt["accepted"]
+    updated = await chat.store.get(("coding", "chat", "approvals"), approval["approval_id"])
+    assert updated["status"] == "RESOLVED" and updated["answer"] == "Our customers"
+    resumed = await chat.claim()
+    assert resumed["execution_chain_id"] == task["execution_chain_id"]
+    assert (await chat.history(task["execution_chain_id"]))[-1].content == "Our customers"
+
+
+async def test_chat_reply_cannot_approve_technical_decision():
+    chat = Conversation()
+    await chat.start()
+    await chat.store.put(("coding", "chat", "approvals"), "technical", {
+        "approval_id": "technical", "status": "PENDING", "producer_agent": "EXECUTE"})
+    assert not (await chat.send("human_reply", {"approval_id": "technical", "answer": "Yes"}))["accepted"]
+    assert (await chat.store.get(("coding", "chat", "approvals"), "technical"))["status"] == "PENDING"
+
+
 async def test_self_and_human_share_backward_budget_and_reject_fourth_round():
     chat = Conversation(max_backward=3)
     task = await chat.start()

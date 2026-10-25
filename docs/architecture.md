@@ -6,7 +6,7 @@ Supervisor tạo `multiprocessing.Queue` và khởi động Dispatcher cùng cá
 bằng `multiprocessing.Process` với start method spawn. Mỗi worker có queue nhận
 việc riêng; mọi worker gửi heartbeat, kết quả và lỗi vào một queue chung.
 
-Dispatcher là process ứng dụng duy nhất tạo Store client. Nó đọc task, kiểm tra
+Dispatcher là process ứng dụng duy nhất ghi Store. Nó đọc task, kiểm tra
 DAG/dependencies và concurrency, claim độc quyền rồi dựng snapshot `task`,
 `project`, `context`, `predecessors`, `thread_id` cho worker. Worker chờ
 `queue.get()` và invoke graph local, không dùng Store/SDK hay polling receipt.
@@ -29,9 +29,11 @@ Shutdown gửi sentinel cho workers, đợi kết quả flush về Dispatcher, r
 Dispatcher, Agent Server và manager bridge. Các process chết được restart có
 giới hạn như trước. Task đã nhận vẫn được bảo vệ bằng owner, lease và attempt.
 
-Communicator đọc Store báo tiến độ và yêu cầu hủy là phần làm sau. Hiện chưa có
-CANCEL hoặc tool truy vấn Store cho agent. Khi thêm, yêu cầu vẫn phải đi qua
-Dispatcher; worker không cần thêm quyền truy cập Store.
+Communicator chat đọc trực tiếp task/approval theo execution chain từ Store để
+báo tiến độ. Nó chỉ gọi ChatOpenAI.ainvoke khi snapshot trạng thái đổi, stream
+token mà không return messages. Theo dõi dừng khi chain CLOSED, chờ human hoặc
+không còn task active sau nhiều lần đọc ổn định. Worker kỹ thuật vẫn không đọc
+Store. Hủy task/CANCEL chưa triển khai; khi thêm phải gửi yêu cầu qua Dispatcher.
 
 Communicator dùng `backward_count` chung khi tự giao hoặc hỏi human, không có bộ đếm hỏi riêng. Approval của Communicator có deadline (mặc định 1800 giây). Trả lời hoặc timeout tạo task Communicator trong cùng chain qua journal/receipt hiện có; timeout ghi SystemMessage, không giả tạo HumanMessage hay phê duyệt. Khi timeout hoặc hết ngân sách, Communicator bàn giao Analyze với giả định công khai. Từ chối không tiếp tục. Task hỏi đã DONE/SUCCESS vì lượt giao tiếp hoàn tất; không giữ lease khi chờ human.
 
@@ -50,7 +52,15 @@ Cả hai pass ghi log private đã che credentials; Decision chỉ phát sự ki
 không stream token. Timeout và lỗi LLM đi qua cơ chế retry kỹ thuật hiện có.
 Skill không thay thế quyền công cụ, sandbox hoặc quyền token GitLab.
 
-Agent Server phục vụ cả `/dashboard` và API giao diện `/api/*`. Built-in Store/thread/run API dùng ORCHESTRATOR_TOKEN. API giao diện dùng DASHBOARD_TOKEN khác, chỉ cung cấp projection công khai và enqueue yêu cầu người dùng. Không có endpoint giao diện nào cho browser ghi task/plan authoritative.
+Agent Server phục vụ cả `/dashboard` và API giao diện `/api/*`. Dashboard là khung
+chat, không còn bảng DAG/workers/artifacts. `/api/chat/stream` dùng LangGraph SDK
+gọi graph communicator với stream_subgraphs=True và modes messages-tuple/custom; root
+graph chứa subgraph communicate để token mang namespace nguồn. API proxy nhận
+messages/project/thread đã kiểm tra, không nhận task/context tùy ý. Khi resume,
+thread phải có metadata dashboard_chat và khớp project. Built-in Store/thread/run
+API dùng ORCHESTRATOR_TOKEN; browser chỉ dùng DASHBOARD_TOKEN khác qua proxy.
+Không có endpoint giao diện nào cho browser ghi task/plan authoritative. Đóng
+stream hủy lượt theo dõi qua on_disconnect=cancel; task nền vẫn do Dispatcher quản lý.
 
 Không bật custom-route auth mặc định của Agent Server cho `/api/*`, vì các route này kiểm tra dashboard token riêng. CORS mặc định cùng origin. Không đưa token vào URL hoặc gửi private scratchpad/raw Qwen logs lên browser. Dashboard stream tiến độ công khai, không stream scratchpad hay raw subprocess output. Patch/report content chỉ hiển thị qua shared artifact references đã được Dispatcher chấp nhận và kiểm tra scope; file trên disk không tự động thành tài liệu public. Shared promotion là đề xuất phải được Dispatcher kiểm tra.
 

@@ -18,6 +18,18 @@ def decision_endpoint():
         def do_POST(self):
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             requests.append(request)
+            if request.get("stream"):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for text in ("Tiến độ: ", "đã cập nhật."):
+                    chunk = {"id": f"chat-fixture-{len(requests)}", "object": "chat.completion.chunk", "created": 1,
+                             "model": "fixture", "choices": [{"index": 0, "finish_reason": None,
+                             "delta": {"role": "assistant", "content": text}}]}
+                    self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
+                    self.wfile.flush()
+                self.wfile.write(b'data: [DONE]\n\n')
+                return
             payload = None
             for message in request["messages"]:
                 text = message.get("content", "")

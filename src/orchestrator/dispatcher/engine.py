@@ -156,7 +156,7 @@ class Dispatcher:
                     "title": "Understand the user's request",
                     "description": "Read the authorized conversation and clarify the user's desired outcome."}])
             return await self._graph(e, graph, tasks, put)
-        if kind in ("approval", "approval_timeout"):
+        if kind in ("approval", "approval_timeout", "human_reply"):
             if agent != Agent.COMMUNICATOR:
                 raise ValueError("only Communicator submits human decisions")
             approval_id = payload.get("approval_id")
@@ -165,17 +165,23 @@ class Dispatcher:
                 raise ValueError("approval is missing or already resolved")
             expires = approval.get("expires_at")
             timed_out = kind == "approval_timeout"
+            is_reply = kind == "human_reply"
+            if is_reply and approval.get("producer_agent") != Agent.COMMUNICATOR:
+                raise ValueError("chat replies only resolve Communicator questions")
             if timed_out and (expires is None or self.clock() < expires):
                 raise ValueError("approval has not expired")
             if not timed_out and expires is not None and self.clock() >= expires:
                 raise ValueError("approval expired; Communicator will continue with explicit assumptions")
-            decision = payload.get("decision")
-            if not timed_out and decision not in ("approve", "reject"):
+            decision = None if is_reply else payload.get("decision")
+            if not timed_out and not is_reply and decision not in ("approve", "reject"):
                 raise ValueError("invalid approval decision")
             answer = str(payload.get("answer", ""))[:10000]
+            if is_reply and not answer.strip():
+                raise ValueError("human reply must not be empty")
             if not timed_out and decision == "approve" and not answer.strip():
                 answer = "Confirmed."  # An explicit click, never an inferred approval.
-            status = "TIMED_OUT" if timed_out else "APPROVED" if decision == "approve" else "REJECTED"
+            status = ("RESOLVED" if is_reply else "TIMED_OUT" if timed_out else
+                      "APPROVED" if decision == "approve" else "REJECTED")
             approval.update(status=status, answer=answer, resolved_at=self.clock())
             put((*ns, "approvals"), approval_id, approval)
             if approval.get("producer_agent") == Agent.COMMUNICATOR:

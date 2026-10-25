@@ -1,4 +1,4 @@
-"""The only application process that opens a Store connection."""
+"""The only application process that writes authoritative Store records."""
 
 import asyncio
 import fcntl

@@ -1,11 +1,4 @@
-"""Small dashboard mounted inside Agent Server, never an authoritative task writer.
-
-The browser receives a separate dashboard token.  It cannot use that token with
-the Agent Server's built-in Store or graph APIs.  These routes publish only
-shared projections and send requests to Dispatcher through Python queues.
-"""
-
-from __future__ import annotations
+"""Chat UI with an authenticated LangGraph SDK streaming proxy."""
 
 import asyncio
 import hmac
@@ -13,7 +6,8 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
+from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -21,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from orchestrator.queues import get_dispatcher
+from langgraph_sdk import get_client
 
 
 PROJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
@@ -86,6 +81,23 @@ class Message(StrictInput):
     message: str = Field(min_length=1, max_length=20000)
 
 
+class ChatMessage(StrictInput):
+    id: UUID
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=20000)
+
+
+class ChatInput(StrictInput):
+    messages: list[ChatMessage] = Field(min_length=1, max_length=200)
+    thread_id: UUID | None = None
+    project_id: str | None = Field(default=None, pattern=PROJECT_ID.pattern)
+
+
+def get_chat_client():
+    return get_client(url=os.getenv("LANGGRAPH_URL", "http://127.0.0.1:2024"),
+                      api_key=os.getenv("ORCHESTRATOR_TOKEN", ""), timeout=None)
+
+
 class ApprovalDecision(StrictInput):
     decision: str = Field(pattern="^(approve|reject)$")
     answer: str = Field(default="", max_length=20000)
@@ -129,7 +141,45 @@ async def dashboard() -> FileResponse:
     return FileResponse(STATIC_ROOT / "index.html", headers={
         "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'",
         "X-Content-Type-Options": "nosniff",
-        "Cache-Control": "no-dispatcher",
+        "Cache-Control": "no-store",
+    })
+
+
+@app.post("/api/chat/stream", dependencies=[Depends(authorize)])
+async def chat_stream(body: ChatInput, request: Request,
+                      client: Annotated[Any, Depends(get_chat_client)]) -> StreamingResponse:
+    if body.messages[-1].role != "user":
+        raise HTTPException(422, "The last message must be from the user")
+    if body.thread_id:
+        thread = await client.threads.get(str(body.thread_id))
+        metadata = thread.get("metadata", {})
+        if not metadata.get("dashboard_chat") or metadata.get("project_id") != body.project_id:
+            raise HTTPException(403, "Thread does not belong to this project chat")
+    else:
+        thread = await client.threads.create(metadata={"dashboard_chat": True, "project_id": body.project_id})
+    thread_id = thread["thread_id"]
+
+    async def stream():
+        yield "event: thread\ndata: " + json.dumps({"thread_id": thread_id}) + "\n\n"
+        try:
+            async for part in client.runs.stream(
+                thread_id, "communicator",
+                input={"messages": [row.model_dump(mode="json") for row in body.messages],
+                       "project_id": body.project_id},
+                stream_mode=["messages-tuple", "custom"], stream_subgraphs=True,
+                on_disconnect="cancel", multitask_strategy="interrupt",
+            ):
+                if await request.is_disconnected():
+                    return
+                # Forward the SDK event name, including the subgraph namespace.
+                yield f"event: {part.event}\ndata: {json.dumps(part.data, ensure_ascii=False, default=str)}\n\n"
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            yield 'event: error\ndata: {"message":"Chat stream failed. Please retry."}\n\n'
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
     })
 
 

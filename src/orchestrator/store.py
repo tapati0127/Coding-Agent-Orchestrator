@@ -1,4 +1,4 @@
-"""Async Store boundary used only by Dispatcher in the application processes.
+"""Async Store boundary for Dispatcher and Communicator's progress reads.
 
 Namespaces are logical partitions, not security boundaries. Keep this adapter out
 of Qwen's tool environment. InMemoryStore is for tests, never a runtime fallback.

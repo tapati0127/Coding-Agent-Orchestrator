@@ -47,8 +47,8 @@ class DispatcherClient:
         self.bridge = bridge
         self.events, self.replies = bridge.events(), bridge.replies()
 
-    async def submit(self, project_id, kind, payload):
-        request_id = uuid4().hex
+    async def submit(self, project_id, kind, payload, *, request_id=None):
+        request_id = request_id or uuid4().hex
         await asyncio.to_thread(self.events.put, {
             "request_id": request_id, "project_id": project_id, "agent": "COMMUNICATOR",
             "kind": kind, "payload": payload,

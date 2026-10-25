@@ -54,9 +54,23 @@ Các kiểm thử tự động dùng Qwen subprocess, phản hồi HTTP LLM gi�
 {"messages": [{"role": "user", "content": "Tôi muốn xây dựng portal cho khách hàng"}]}
 ```
 
-Node `communicate` đọc lịch sử `messages` và gọi ChatOpenAI trực tiếp; không cần
-`task`, `cwd` hoặc Qwen Code. Dùng cùng thread để giữ lịch sử qua các lượt chat.
-Chat trực tiếp trả lời bằng `AIMessage`; luồng Dashboard bên dưới tạo task dự án.
+Subgraph `communicate` đọc lịch sử `messages` và gọi ChatOpenAI bằng `ainvoke`;
+không cần `task`, `cwd` hoặc Qwen Code. Câu trả lời phát qua stream, node không
+return `messages`. Client gửi lại lịch sử hiển thị với các message ID ổn định khi
+nhắn lượt tiếp theo. Dùng cùng thread để giữ execution chain của cuộc trao đổi.
+
+Dashboard chỉ có khung chat và phần chọn/tạo dự án. Route `/api/chat/stream` dùng
+LangGraph SDK gọi `runs.stream` với `stream_mode=["messages-tuple", "custom"]` và
+`stream_subgraphs=True`, rồi chuyển tiếp token và namespace subgraph tới browser.
+Browser chỉ giữ DASHBOARD_TOKEN trong bộ nhớ; runtime token nằm ở server.
+
+Khi chọn dự án, Communicator gửi yêu cầu vào queue Dispatcher rồi đọc trực tiếp
+task/approval của execution chain từ Store. Chỉ khi trạng thái thay đổi mới gọi
+LLM để báo tiến độ; heartbeat không làm phát sinh lời trả lời mới. Theo dõi kết
+thúc khi cả chain CLOSED, cần người dùng trả lời, hoặc không còn task chạy/đợi
+và trạng thái giữ nguyên qua nhiều lần đọc. Chat trả lời câu hỏi làm rõ tiếp tục
+cùng chain qua `human_reply` (câu hỏi chuyển `RESOLVED`, không tự đánh dấu phê
+duyệt). Dừng theo dõi hoặc đóng browser không hủy task nền.
 
 Supervisor tạo một queue kết quả chung và một queue nhận việc cho mỗi worker
 bằng `multiprocessing.Queue`, rồi khởi động Dispatcher và các worker bằng
@@ -69,7 +83,8 @@ Dispatcher đọc/ghi Store
     → Dispatcher kiểm tra, lưu kết quả và giao task tiếp theo
 ```
 
-**Chỉ Dispatcher có Store client.** Dispatcher dựng context, kiểm tra dependencies,
+**Chỉ Dispatcher ghi Store; Communicator chat đọc Store để báo tiến độ.**
+Dispatcher dựng context, kiểm tra dependencies,
 claim task và cấp lease trước khi giao việc. Worker không poll Store, không chờ
 receipt và không gọi LangGraph SDK. Worker chờ bằng `queue.get()`, log bắt đầu/kết
 thúc/lỗi, rồi chạy graph ngay trong process của mình. Mỗi graph run xử lý một task
@@ -85,7 +100,7 @@ Supervisor mở một `multiprocessing.Manager` bridge trên loopback để Dash
 yêu cầu và nhận phản hồi từ Dispatcher. Dashboard cũng không mở Store client.
 Chạy qua Supervisor để có bridge; graph chat `messages` vẫn dùng được riêng.
 
-Quyền Communicator đọc tiến độ và hủy task chưa triển khai; chưa thêm `CANCEL`.
+Chưa triển khai hủy task hoặc trạng thái `CANCEL`.
 
 Yêu cầu từ Dashboard tạo task Communicator thực sự. Agent này gọi LLM với
 `prompts/communicator.md`, đứng về phía người dùng để làm rõ mục tiêu, phạm vi và
@@ -124,9 +139,10 @@ Endpoint/model cần hỗ trợ tham số tương ứng để áp dụng chế �
 
 Với các agent kỹ thuật, Work pass chạy Qwen Code CLI. Decision pass gửi role prompt, task/context được cấp
 và kết quả Work pass sang `langchain_openai.ChatOpenAI`, gọi bất đồng bộ bằng
-`ainvoke()`. Cả `streaming=False` và `disable_streaming=True` được đặt để tắt stream,
+`ainvoke()`. Decision đặt `streaming=False` và `disable_streaming=True` để tắt stream,
 kể cả khi LangGraph có callback streaming. Tag `nostream` ngăn phản hồi Decision
-phát ra qua luồng `messages` của LangGraph. Decision dùng Chat Completions với
+phát ra qua luồng `messages` của LangGraph. Riêng chat/báo tiến độ Communicator bật
+stream token và không dùng tag `nostream`; thinking vẫn tắt. Decision dùng Chat Completions với
 `response_format=json_schema` (`strict=False`); endpoint nội bộ cần hỗ trợ chế độ
 này. Runtime vẫn kiểm tra `TaskGraphOutput`, danh tính source và quyền giao task.
 

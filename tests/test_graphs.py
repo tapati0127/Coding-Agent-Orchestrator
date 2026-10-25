@@ -39,8 +39,7 @@ async def test_communicator_task_calls_chat_llm_with_typed_messages(monkeypatch,
         "messages": [HumanMessage(content="Build a portal", id="human-1")],
     })
     assert isinstance(output["messages"][0], HumanMessage)
-    assert isinstance(output["messages"][1], AIMessage)
-    assert output["messages"][1].content == "Who will use it?"
+    assert len(output["messages"]) == 1  # Replies are streamed, not returned to messages.
     runtime.ainvoke.assert_awaited_once()
     messages, schema = runtime.ainvoke.call_args.args
     assert isinstance(messages[0], SystemMessage)
@@ -62,9 +61,15 @@ async def test_communicator_accepts_messages_without_task_or_cwd(monkeypatch):
     runtime = SimpleNamespace(chat=AsyncMock(return_value=AIMessage(content="Chào bạn!")))
     monkeypatch.setattr(communicator_module, "DecisionRunner", lambda: runtime)
     monkeypatch.setattr(common, "QwenRunner", Mock(side_effect=AssertionError("No Qwen Code for chat")))
-    output = await communicator.ainvoke({"messages": [{"role": "user", "content": "Xin chào"}]})
-    assert output["messages"][-1].content == "Chào bạn!"
-    assert "result" not in output
+    chunks = [chunk async for chunk in communicator.astream(
+        {"messages": [{"role": "user", "content": "Xin chào"}]},
+        stream_mode=["custom", "values"], subgraphs=True)]
+    replies = [(namespace, data) for namespace, mode, data in chunks if mode == "custom"]
+    assert replies[0][0]  # The reply originates inside the communicate subgraph.
+    assert replies[0][1]["content"] == "Chào bạn!"
+    output = [data for namespace, mode, data in chunks if mode == "values" and not namespace][-1]
+    assert len(output["messages"]) == 1 and "result" not in output
+    assert runtime.chat.call_args.kwargs == {"stream": True}
     history = runtime.chat.call_args.args[0]
     assert isinstance(history[0], SystemMessage)
     assert "the user's representative" in history[0].content
@@ -81,12 +86,14 @@ async def test_communicator_reads_previous_turns_in_the_same_thread(monkeypatch)
     graph = communicator_module.builder.compile(checkpointer=InMemorySaver())
     config = {"configurable": {"thread_id": "conversation-1"}}
     await graph.ainvoke({"messages": [("user", "Tạo portal")]}, config)
-    output = await graph.ainvoke({"messages": [("user", "Cho khách hàng")]}, config)
+    # The chat client supplies visible assistant replies as next-turn input.
+    output = await graph.ainvoke({"messages": [AIMessage(content="Ai sẽ dùng portal?", id="ai-1"),
+                                               ("user", "Cho khách hàng")]}, config)
     history = runtime.chat.call_args.args[0]
     assert [message.content for message in history[1:]] == [
         "Tạo portal", "Ai sẽ dùng portal?", "Cho khách hàng",
     ]
-    assert len(output["messages"]) == 4
+    assert len(output["messages"]) == 3
 
 
 async def test_communicator_requires_a_user_message_before_calling_llm(monkeypatch):
