@@ -227,3 +227,17 @@ async def test_graph_streams_progress_without_private_log_text(monkeypatch, tmp_
     assert events[0]["chunks"] == 1
     assert events[0]["phase"] == "work"
     assert "PRIVATE_SCRATCHPAD" not in str(events)
+
+
+async def test_communicator_invalid_decision_repairs_are_bounded(monkeypatch):
+    invalid = {"project_id": "p", "source_task_id": "t", "producer_agent": "COMMUNICATOR",
+               "execution_chain_id": "chain", "human_request": {"question": "Who uses it?"},
+               "source_result": None}
+    model = SimpleNamespace(chat=AsyncMock(return_value=AIMessage(content="Who uses it?")),
+                            ainvoke=AsyncMock(return_value=invalid))
+    monkeypatch.setattr(communicator_module, "DecisionRunner", lambda: model)
+    with pytest.raises(ValueError, match="still invalid after 3 attempts"):
+        await communicator.ainvoke({"task": {"project_id": "p", "task_id": "t",
+            "agent": "COMMUNICATOR", "execution_chain_id": "chain", "max_attempts": 3},
+            "messages": [HumanMessage(content="Build a portal")]})
+    assert model.chat.await_count == 1 and model.ainvoke.await_count == 3

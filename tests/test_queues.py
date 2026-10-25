@@ -7,6 +7,7 @@ import multiprocessing as mp
 from queue import Empty, Queue
 import time
 from unittest.mock import AsyncMock, Mock
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -192,3 +193,35 @@ async def test_python_queue_submits_requests_to_dispatcher():
         await asyncio.wait_for(task, timeout=5)
         events.close()
         events.join_thread()
+
+
+async def test_communicator_repairs_null_result_before_dispatcher_and_releases_worker(tmp_path, monkeypatch):
+    store, engine, jobs, loop = await setup({"chat": "COMMUNICATOR"})
+    await loop.handle({"request_id": "human", "project_id": "p1", "agent": "COMMUNICATOR",
+                       "kind": "human_message", "payload": {"message": "Build a game"}})
+    await loop.schedule()
+    job = jobs["chat"].get_nowait()
+    task = Task.model_validate(job["task"])
+    question = {"question": "How many players?"}
+    invalid = proposal(task, source_result=None, human_request=question)
+    valid = proposal(task, human_request=question)
+    model = SimpleNamespace(chat=AsyncMock(return_value=AIMessage(content=question["question"])),
+                            ainvoke=AsyncMock(side_effect=[invalid, valid]))
+    monkeypatch.setattr("orchestrator.graphs.communicator.DecisionRunner", lambda: model)
+    worker = Worker("COMMUNICATOR", "chat", loop.events, data_root=tmp_path)
+    await worker.execute(job)
+    while True:
+        try:
+            await loop.handle(loop.events.get_nowait())
+        except Empty:
+            break
+    assert model.chat.await_count == 1 and model.ainvoke.await_count == 2
+    schema = model.ainvoke.call_args.args[1]
+    assert "source_result" in schema["required"]
+    assert schema["properties"]["source_result"] == {"$ref": "#/$defs/SourceResult"}
+    saved = (await engine.tasks("p1"))[task.task_id]
+    assert saved.status == Status.DONE and saved.lease_expires_at is None
+    assert (await store.get(("coding", "p1", "workers"), "chat"))["status"] == "IDLE"
+    approvals = await store.search(("coding", "p1", "approvals"))
+    assert len(approvals) == 1 and approvals[0]["status"] == "PENDING"
+    assert approvals[0]["question"] == question["question"]

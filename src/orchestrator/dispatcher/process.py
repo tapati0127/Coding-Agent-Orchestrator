@@ -23,7 +23,8 @@ class DispatcherLoop:
     async def handle(self, event):
         receipt = await self.engine.handle(event)
         if event.get("kind") == "result" and not receipt["accepted"]:
-            log.warning("Task result rejected: task=%s worker=%s", event.get("task_id"), event.get("worker_id"))
+            log.warning("Task result rejected: task=%s worker=%s reason=%s",
+                        event.get("task_id"), event.get("worker_id"), receipt.get("reason"))
             await self.engine.handle({**event, "request_id": uuid4().hex, "kind": "failure",
                                       "payload": {"error": "result_rejected"}})
 

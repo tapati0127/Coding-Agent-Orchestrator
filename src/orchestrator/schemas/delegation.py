@@ -21,6 +21,14 @@ def validate_delegation(graph: TaskGraphOutput) -> None:
 
 def decision_schema(agent: str) -> dict:
     schema = TaskGraphOutput.model_json_schema()
+    # Decision passes always finish a claimed task. Only synthetic human intake
+    # may omit a result in the broader transport protocol.
+    schema["properties"]["source_result"] = {"$ref": "#/$defs/SourceResult"}
+    schema["required"] = [*schema["required"], "source_result"]
+    if agent == Agent.COMMUNICATOR:
+        result = schema["$defs"]["SourceResult"]["properties"]
+        result["outcome"] = {"type": "string", "enum": ["SUCCESS"]}
+        result["proposed_status"] = {"type": "string", "enum": ["DONE"], "default": "DONE"}
     if agent == Agent.ANALYZE:
         # Restrict node targets only: producer_agent must still accept ANALYZE.
         node = schema["$defs"]["GraphNode"]["properties"]

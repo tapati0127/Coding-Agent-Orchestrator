@@ -2,6 +2,7 @@
 import asyncio
 from importlib.resources import files
 import json
+import logging
 from pathlib import Path
 from typing import Annotated
 
@@ -17,6 +18,7 @@ from orchestrator.schemas.task_graph import TaskGraphOutput
 from orchestrator.graphs.progress import follow_progress
 from orchestrator.graphs.projects import select_project, after_selection
 
+LOGGER = logging.getLogger(__name__)
 
 class CommunicatorState(AgentState, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
@@ -50,6 +52,7 @@ async def communicate(state: CommunicatorState, runtime: Runtime) -> dict:
         if state.get("project_id"):
             return await follow_progress(state, model, messages, writer, store=runtime.store)
         reply = await model.chat(messages, stream=True)
+        LOGGER.info(f"[communicate] [reply] {reply}")
         writer({"type": "reply", "id": reply.id, "content": reply.content})
         return {
             "messages": [reply]
@@ -65,13 +68,37 @@ async def communicate(state: CommunicatorState, runtime: Runtime) -> dict:
         "Ask a concise question if needed, or summarize the requirements and intended handoff. "
         "Do not output JSON or claim a project/task was dispatched. After timeout, explain "
         "that the response deadline expired and state assumptions for Analyze.")])
-    output = await model.ainvoke([*messages, AIMessage(content=draft.content), SystemMessage(content=
+    LOGGER.info(f"[communicate] [draft] {draft}")
+    decision_messages = [*messages, AIMessage(content=draft.content), SystemMessage(content=
         "Structure pass: use the full history and conversation draft to produce TaskGraphOutput. "
         "The draft is not a human answer or approval. Make the question or notification agree "
         "with the draft. When handing off, include the user-facing reply in notification.message. "
         "After timeout you must hand off to Analyze and notify the user about the timeout "
-        "and explicit assumptions.")], decision_schema("COMMUNICATOR"))
-    output = TaskGraphOutput.model_validate(output).model_dump(mode="json", by_alias=True)
+        "and explicit assumptions. Always include source_result with outcome=SUCCESS and "
+        "proposed_status=DONE, including when asking the human a question. This finishes "
+        "the communication turn, not the whole project.")]
+    attempts = max(1, min(3, int(task.get("max_attempts", 3))))
+    for attempt in range(attempts):
+        output = await model.ainvoke(decision_messages, decision_schema("COMMUNICATOR"))
+        try:
+            parsed = TaskGraphOutput.model_validate(output)
+            if parsed.source_result is None:
+                raise ValueError("source_result is required for the claimed Communicator task")
+            if parsed.source_result.outcome != "SUCCESS" or parsed.source_result.proposed_status != "DONE":
+                raise ValueError("A completed Communicator turn must report SUCCESS and DONE, even for clarification")
+        except ValueError as exc:
+            if attempt + 1 == attempts:
+                raise ValueError(f"Communicator decision is still invalid after {attempts} attempts") from exc
+            LOGGER.warning("Repairing invalid Communicator decision: attempt=%s", attempt + 1)
+            decision_messages = [*decision_messages, SystemMessage(content=
+                "The previous structured decision was invalid. Return the complete TaskGraphOutput "
+                "again, using the same conversation draft and task identity. Always provide a non-null "
+                "source_result with outcome=SUCCESS and proposed_status=DONE. A question releases the "
+                "worker while the human answers; it still completes this communication turn.")]
+            continue
+        output = parsed.model_dump(mode="json", by_alias=True)
+        break
+    LOGGER.info(f"[communicate] [output] {output}")
     expected = {"project_id": task["project_id"], "source_task_id": task["task_id"],
                 "producer_agent": "COMMUNICATOR", "execution_chain_id": task["execution_chain_id"]}
     if any(output[key] != value for key, value in expected.items()):

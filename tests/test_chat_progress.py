@@ -203,3 +203,54 @@ async def test_progress_reads_all_pages_and_filters_chain_in_store():
     result = await progress.read_progress(store, "p", "chain")
     assert len(result["tasks"]) == 105
     assert all(row["task_id"] != "other" for row in result["tasks"])
+
+
+async def test_rejected_result_ends_chat_without_waiting_for_lease_or_model(monkeypatch):
+    import asyncio
+    from orchestrator.dispatcher.engine import Dispatcher
+    from orchestrator.dispatcher.process import DispatcherLoop
+    from orchestrator.store import StoreRecords
+    from queue import Queue
+
+    store = InMemoryStore()
+    engine = Dispatcher(StoreRecords(store), clock=lambda: 1000.)
+    async def send(kind, payload=None, **extra):
+        from uuid import uuid4
+        return await engine.handle({"request_id": uuid4().hex, "project_id": "p",
+            "agent": "COMMUNICATOR", "kind": kind, "payload": payload or {}, **extra})
+    await send("register_project")
+    await send("human_message", {"message": "Build a game"})
+    claimed = await send("claim", worker_id="chat")
+    task = claimed["task"]
+    loop = DispatcherLoop(engine, Queue(), {}, {})
+    await loop.handle({"request_id": "invalid", "project_id": "p", "agent": "COMMUNICATOR",
+        "kind": "result", "worker_id": "chat", "task_id": task["task_id"],
+        "task_attempt": task["attempt"], "payload": {"project_id": "p",
+        "source_task_id": task["task_id"], "producer_agent": "COMMUNICATOR",
+        "execution_chain_id": task["execution_chain_id"], "source_result": None,
+        "human_request": {"question": "How many players?"}}})
+    model = SimpleNamespace(chat=AsyncMock(side_effect=AssertionError("Error reporting must not call LLM")))
+    monkeypatch.setattr(progress, "get_dispatcher", lambda: object())
+    events = []
+    human = HumanMessage(content="tiến độ", id="status")
+    result = await asyncio.wait_for(progress.follow_progress({"project_id": "p",
+        "execution_chain_id": task["execution_chain_id"], "messages": [human]},
+        model, [human], events.append, store=store), timeout=1)
+    blocked = next(event for event in events if event.get("status") == "blocked")
+    assert blocked["tasks"][0]["run_error"] == "result_rejected"
+    assert result["messages"] and "gặp lỗi" in result["messages"][-1].content
+    model.chat.assert_not_awaited()
+    assert (await engine.tasks("p"))[task["task_id"]].status == "DOING"
+    assert not blocked["approvals"]  # Never show the rejected question as accepted.
+    # An in-flight heartbeat after result rejection must not hide the failure
+    # or keep the failed attempt alive forever.
+    heartbeat = await send("heartbeat", worker_id="chat", task_id=task["task_id"],
+                           task_attempt=task["attempt"])
+    assert not heartbeat["accepted"] and "has failed" in heartbeat["reason"]
+    assert (await engine.tasks("p"))[task["task_id"]].lease_expires_at == task["lease_expires_at"]
+    # Once recovery claims the next attempt, the old failure cannot block it.
+    worker = (await store.aget(("coding", "p", "workers"), "chat")).value
+    worker["task_attempt"] -= 1
+    await store.aput(("coding", "p", "workers"), "chat", worker)
+    snapshot = await progress.read_progress(store, "p", task["execution_chain_id"])
+    assert "run_error" not in snapshot["tasks"][0]

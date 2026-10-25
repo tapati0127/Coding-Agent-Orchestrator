@@ -281,6 +281,10 @@ class Dispatcher:
         if e.get("task_attempt", task.attempt) != task.attempt:
             raise ValueError("task attempt is stale")
         if kind == "heartbeat":
+            worker = await self.store.get((*ns, "workers"), task.assigned_worker) or {}
+            if (worker.get("status") == "FAILED" and worker.get("task_id") == task.task_id
+                    and worker.get("task_attempt", task.attempt) == task.attempt):
+                raise ValueError("worker attempt has failed; awaiting lease recovery")
             task.lease_expires_at = self.clock() + self.lease_seconds
             for name in ("worktree_path", "base_commit", "branch", "thread_id", "qwen_session_id"):
                 if name in payload:
@@ -299,7 +303,9 @@ class Dispatcher:
             # Keep the lease until expiry, then retry through recovery.
             put((*ns, "workers"), task.assigned_worker, {"worker_id": task.assigned_worker,
                 "agent": agent.value, "task_id": task.task_id, "status": "FAILED",
-                "last_heartbeat": self.clock(), "error": "worker run failed; awaiting lease recovery"})
+                "last_heartbeat": self.clock(), "task_attempt": task.attempt,
+                "error_code": payload.get("error") if payload.get("error") in {"result_rejected", "context_failed"} else "worker_failed",
+                "error": "worker run failed; awaiting lease recovery"})
             return {}
         graph = TaskGraphOutput.model_validate(payload)
         if (graph.project_id != pid or graph.source_task_id != task.task_id
