@@ -37,5 +37,8 @@ def test_settings_validate_limits_and_hide_secrets():
         Settings.from_env({"MAX_BACKWARD_DELEGATIONS": "4"})
     with pytest.raises(ValueError):
         Settings.from_env({"DISPATCH_POLL_SECONDS": "0"})
+    with pytest.raises(ValueError):
+        Settings.from_env({"HUMAN_RESPONSE_TIMEOUT_SECONDS": "0"})
+    assert Settings.from_env({"HUMAN_RESPONSE_TIMEOUT_SECONDS": "1800"}).human_response_timeout_seconds == 1800
     settings = Settings.from_env({"QWEN_API_KEY": "private", "ORCHESTRATOR_TOKEN": "private2"})
     assert "private" not in repr(settings)

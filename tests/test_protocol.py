@@ -167,3 +167,16 @@ def test_multihop_replacement_preserves_all_join_and_blocks_cycle():
     second.replaced_by_task_id = "original"
     second.outcome = Outcome.FAILED
     assert blockers(successor, tasks)
+
+
+@pytest.mark.parametrize("change", [
+    {"human_request": {"question": "Ask the user directly?"}},
+    {"nodes": [node("ask", "COMMUNICATOR", node_type="HUMAN_APPROVAL")]},
+])
+def test_analyze_cannot_bypass_communicator_for_human_clarification(change):
+    with pytest.raises(ValueError, match="through a COMMUNICATOR TASK"):
+        validate_dag(graph(producer_agent="ANALYZE", **change), {})
+
+
+def test_analyze_may_return_no_new_tasks_when_existing_plan_covers_next_step():
+    validate_dag(graph(producer_agent="ANALYZE", nodes=[]), {})

@@ -2,11 +2,15 @@
 
 ## Process và dữ liệu
 
-Một Supervisor chạy Agent Server, Dispatcher và các worker độc lập trong một container. Sáu graph không có cạnh giao việc với nhau. Graph 1–5 gọi Qwen hai pass: thực thi công việc rồi quyết định JSON theo cùng `TaskGraphOutput`. Communicator sinh protocol bằng Python, không gọi Qwen.
+Một Supervisor chạy Agent Server, Dispatcher và các worker độc lập trong một container. Sáu graph không có cạnh giao việc với nhau. Cả sáu graph gọi Qwen hai pass: thực hiện nhiệm vụ rồi quyết định JSON theo cùng `TaskGraphOutput`. Communicator có prompt riêng hướng người dùng, không được cấp công cụ đọc/sửa repository. Dashboard enqueue yêu cầu, Dispatcher tạo task Communicator trước Analyze.
 
 Worker gửi claim, heartbeat và kết quả vào request inbox. Dispatcher kiểm tra quyền sở hữu task/lease, schema, DAG, ALL-join, outcome, chuyển trạng thái, tích hợp Git và backward budget, rồi ghi tasks/plans/events/receipts. Worker không ghi namespace task chính thức. Store là dữ liệu liên graph; checkpoint không thay thế Store.
 
 Số Execute workers có thể tới 5, nhưng mọi graph Qwen dùng chung giới hạn 5 subprocess. Limiter dùng semaphore theo process và phạm vi `DATA_ROOT`, với chờ bất đồng bộ không block event loop; giới hạn vẫn áp dụng khi graph chạy trên nhiều event loop trong Agent Server. Supervisor truyền rõ `--n-jobs-per-worker 10`: CLI đã pin mặc định chỉ một background run và ghi đè cấu hình concurrency chỉ đặt bằng biến môi trường. Chỉ graph Verify được `IN_REVIEW`. Chỉ Finalize được đề nghị đóng các task hợp lệ; Dispatcher thực hiện đóng. Rework tạo task mới để giữ lịch sử, không mở lại task `DONE`. Node rework có thể khai báo `replaces_task_id` để thay một task `DONE` thất bại cùng vai trò. Dispatcher giữ nguyên status/outcome cũ, kiểm tra replacement và dùng alias tới task thay thế để các task downstream đang chờ theo dõi kết quả rework đã được chấp nhận; không âm thầm sửa dependency của task đang chạy.
+
+Communicator dùng `backward_count` chung khi tự giao hoặc hỏi human, không có bộ đếm hỏi riêng. Approval của Communicator có deadline (mặc định 1800 giây). Trả lời hoặc timeout tạo task Communicator trong cùng chain qua journal/receipt hiện có; timeout ghi SystemMessage, không giả tạo HumanMessage hay phê duyệt. Khi timeout hoặc hết ngân sách, Communicator bàn giao Analyze với giả định công khai. Từ chối không tiếp tục. Task hỏi đã DONE/SUCCESS vì lượt giao tiếp hoàn tất; không giữ lease khi chờ human.
+
+`CommunicatorState.Messages` là danh sách `AnyMessage` dùng reducer `add_messages`. Lịch sử được journal theo chain ở `("coding", project_id, "conversations")`, không nằm trong shared context/task description. Chỉ Communicator, Analyze, Finalize được scoped adapter đọc lịch sử. Finalize dùng nó đối chiếu nghiệm thu với mong muốn người dùng; các role còn lại chỉ nhận brief/contract. Dashboard có projection riêng của tin nhắn human/ai.
 
 ## HTTP và quyền
 

@@ -101,13 +101,15 @@ function renderWorkers(){
 }
 function renderConversation(){
   const host=$("conversation");host.replaceChildren();
-  for(const task of current.tasks.filter(t=>t.agent==="ANALYZE"&&!t.parent_task_id)){const row=el("div",null,"chat-message");row.append(el("strong","Bạn"),el("p",task.description||task.title));host.append(row);}
-  for(const notification of current.notifications||[]){const row=el("div",null,"chat-message");row.append(el("strong","Communicator"),el("p",notification.message));host.append(row);}
+  const messages=(current.conversations||[]).flatMap(c=>c.Messages||[]);
+  for(const message of messages){const row=el("div",null,"chat-message");row.append(el("strong",message.type==="human"?"Bạn":"Communicator"),el("p",message.content));host.append(row);}
+  if(!messages.length)for(const task of current.tasks.filter(t=>t.agent==="ANALYZE"&&!t.parent_task_id)){const row=el("div",null,"chat-message");row.append(el("strong","Bạn"),el("p",task.description||task.title));host.append(row);}
+  for(const notification of (current.notifications||[]).filter(n=>!messages.some(m=>m.content===n.message))){const row=el("div",null,"chat-message");row.append(el("strong","Communicator"),el("p",notification.message));host.append(row);}
 }
 function renderApprovals(){
   const host=$("approvals");host.replaceChildren();
-  for(const approval of current.approvals.filter(a=>!["APPROVED","REJECTED","RESOLVED","approved","rejected","resolved"].includes(a.status))){
-    const card=el("div",null,"approval"),answer=el("textarea");answer.rows=2;answer.placeholder="Câu trả lời hoặc lý do quyết định";card.append(el("p",approval.question||approval.reason||"Cần quyết định của bạn"),answer);const actions=el("div",null,"actions");
+  for(const approval of current.approvals.filter(a=>!["APPROVED","REJECTED","RESOLVED","TIMED_OUT","approved","rejected","resolved"].includes(a.status))){
+    const card=el("div",null,"approval"),answer=el("textarea");answer.rows=2;answer.placeholder="Câu trả lời hoặc lý do quyết định";card.append(el("p",approval.question||approval.reason||"Cần quyết định của bạn"),answer);if(approval.expires_at)card.append(el("small",`Nếu chưa có trả lời trước ${new Date(approval.expires_at*1000).toLocaleString()}, Communicator sẽ tiếp tục với giả định được nêu rõ.`));const actions=el("div",null,"actions");
     for(const[decision,label]of [["approve","Chấp thuận / Trả lời"],["reject","Từ chối"]]){const button=el("button",label,decision==="reject"?"secondary":"");button.onclick=async()=>{try{const result=await api(`/api/projects/${selectedProject}/approvals/${approval.approval_id}`,{decision,answer:answer.value});receipt("Đã gửi quyết định",result);button.disabled=true;await refresh();}catch(e){showError(e);}};actions.append(button);}card.append(actions);host.append(card);
   }
 }

@@ -135,7 +135,7 @@ TASK_FIELDS = {
 }
 PLAN_FIELDS = {"plan_id", "plan_version", "version", "summary", "nodes", "edges", "created_at"}
 EVENT_FIELDS = {"event_id", "id", "kind", "type", "timestamp", "created_at", "task_id", "message", "summary", "request_id", "accepted", "reason", "agent", "worker_id", "notification", "artifact_refs"}
-APPROVAL_FIELDS = {"approval_id", "project_id", "source_task_id", "question", "reason", "status", "options", "decision", "answer", "created_at", "resolved_at", "execution_chain_id"}
+APPROVAL_FIELDS = {"approval_id", "project_id", "source_task_id", "question", "reason", "status", "options", "decision", "answer", "created_at", "resolved_at", "execution_chain_id", "expires_at", "producer_agent"}
 WORKER_FIELDS = {"worker_id", "agent", "status", "task_id", "project_id", "worktree_path", "heartbeat_at", "last_heartbeat", "lease_expires_at", "updated_at", "progress"}
 ARTIFACT_FIELDS = {"artifact_id", "ref", "title", "kind", "media_type", "summary", "content", "created_at", "task_id", "commit_sha"}
 
@@ -167,11 +167,12 @@ async def snapshot(pid: str, store: Store) -> dict:
     project = await store.get(("coding", "projects"), pid)
     if project is None:
         raise HTTPException(404, "Project not found")
-    tasks, plans, events, approvals, workers, artifacts, notifications = await asyncio.gather(*(
+    tasks, plans, events, approvals, workers, artifacts, notifications, conversations = await asyncio.gather(*(
         store.search(("coding", pid, *parts)) for parts in (
             ("tasks",), ("plans",), ("events",), ("approvals",), ("workers",),
             ("shared", "artifacts"),
             ("notifications",),
+            ("conversations",),
         )
     ))
     by_id = {row.get("task_id"): row for row in tasks}
@@ -206,6 +207,12 @@ async def snapshot(pid: str, store: Store) -> dict:
         "workers": [public(row, WORKER_FIELDS) for row in workers],
         "artifacts": [public(row, ARTIFACT_FIELDS - {"content"}) for row in artifacts],
         "notifications": [public(row, {"message", "timestamp"}) for row in notifications],
+        # The authenticated human sees their conversation; this projection is
+        # never supplied to agent workers as shared context.
+        "conversations": [{"execution_chain_id": row["execution_chain_id"],
+            "Messages": [{"type": m["type"], "content": m["data"]["content"]}
+                         for m in row.get("Messages", []) if m.get("type") in {"human", "ai"}]}
+            for row in sorted(conversations, key=lambda row: row.get("created_at", 0))],
     }
 
 

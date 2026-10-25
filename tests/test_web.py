@@ -155,3 +155,23 @@ async def test_snapshot_resolves_rework_dependency_without_rewriting_history(web
     assert verify["blocking_reasons"] == []
     old = next(task for task in second["tasks"] if task["task_id"] == "old")
     assert old["outcome"] == "CHANGES_REQUESTED" and old["replaced_by_task_id"] == "fixed"
+
+
+async def test_snapshot_shows_human_conversation_and_timeout_but_not_system_messages(web):
+    client, store = web
+    await store.put(("coding", "projects"), "p1", {"project_id": "p1"})
+    await store.put(("coding", "p1", "conversations"), "chain", {
+        "execution_chain_id": "chain", "Messages": [
+            {"type": "human", "data": {"content": "Build a portal"}},
+            {"type": "ai", "data": {"content": "Who uses it?"}},
+            {"type": "system", "data": {"content": "Internal timeout instructions"}},
+        ], "private_field": "hidden",
+    })
+    await store.put(("coding", "p1", "approvals"), "approval", {
+        "approval_id": "approval", "status": "TIMED_OUT", "expires_at": 1800,
+    })
+    response = client.get("/api/projects/p1/snapshot", headers=AUTH)
+    assert response.json()["conversations"][0]["Messages"] == [
+        {"type": "human", "content": "Build a portal"}, {"type": "ai", "content": "Who uses it?"}]
+    assert "Internal timeout instructions" not in response.text and "hidden" not in response.text
+    assert response.json()["approvals"][0]["expires_at"] == 1800

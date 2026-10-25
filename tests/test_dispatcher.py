@@ -502,3 +502,28 @@ async def test_replacement_cannot_create_cycle_through_existing_dependency_alias
     receipt = await dispatcher.handle(envelope("result", source, output))
     assert not receipt["accepted"]
     assert (await dispatcher.tasks(PROJECT))["original"].replaced_by_task_id is None
+
+
+@pytest.mark.parametrize("target", ["ANALYZE", "EXECUTE", "VERIFY_INTEGRATE", "FINALIZE"])
+async def test_analyze_cannot_bypass_route_policy_or_partially_create_plan(target):
+    store, dispatcher = await setup_dispatcher(clock=lambda: 1000.)
+    source = await active(store)
+    output = proposal(source, nodes=[node("valid", "PLAN_DELEGATE"), node("invalid", target)])
+    receipt = await dispatcher.handle(envelope("result", source, output))
+    assert not receipt["accepted"] and "only to COMMUNICATOR or PLAN_DELEGATE" in receipt["reason"]
+    tasks = await dispatcher.tasks(PROJECT)
+    assert list(tasks) == [source.task_id]
+    assert tasks[source.task_id].status == Status.DOING
+    assert await store.search(("coding", PROJECT, "plans")) == []
+
+
+@pytest.mark.parametrize("target", ["COMMUNICATOR", "PLAN_DELEGATE"])
+async def test_analyze_can_delegate_to_each_allowed_role(target):
+    store, dispatcher = await setup_dispatcher(clock=lambda: 1000.)
+    source = await active(store)
+    output = proposal(source, nodes=[node("next", target, reason="Clarify scope" if target == "COMMUNICATOR" else None)],
+                      outcome="NEED_ANALYSIS" if target == "COMMUNICATOR" else "SUCCESS")
+    receipt = await dispatcher.handle(envelope("result", source, output))
+    assert receipt["accepted"]
+    tasks = await dispatcher.tasks(PROJECT)
+    assert tasks[receipt["task_ids"][0]].agent == target

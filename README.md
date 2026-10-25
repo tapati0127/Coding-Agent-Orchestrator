@@ -46,6 +46,34 @@ curl --fail http://127.0.0.1:2024/ok
 
 Các kiểm thử tự động dùng Qwen subprocess giả lập hoặc Git repository tạm để xác minh protocol, quyền, DAG và cơ chế runtime. Chúng không xác minh chất lượng đầu ra mô hình nội bộ của bạn. Hãy chạy một yêu cầu thực với endpoint đã cấu hình trước khi coi luồng LLM end-to-end được nghiệm thu.
 
+## Communicator và hội thoại
+
+Yêu cầu từ Dashboard tạo task Communicator thực sự. Agent này gọi LLM với
+`prompts/communicator.md`, đứng về phía người dùng để làm rõ mục tiêu, phạm vi và
+kết quả mong muốn; không khám phá repository hoặc dùng công cụ sửa code.
+Communicator chọn giao cho chính nó, hỏi human bằng `human_request`/`HUMAN_APPROVAL`,
+hoặc bàn giao bản tóm tắt yêu cầu cho Analyze.
+
+Tự giao và hỏi human đều dùng `backward_count` chung của execution chain, giới hạn
+bởi `MAX_BACKWARD_DELEGATIONS`; không có bộ đếm hỏi riêng. Trả lời không reset
+chain/budget. Khi chờ human, worker được giải phóng. Sau 30 phút mặc định, approval
+chuyển `TIMED_OUT` và Dispatcher tạo task Communicator tiếp tục trong cùng chain.
+Communicator chuyển sang Analyze với giả định nêu rõ khi hết thời gian hoặc hết
+ngân sách; không coi im lặng là phê duyệt. Người dùng từ chối thì không tự tiếp tục.
+
+State Communicator có `Messages: Annotated[list[AnyMessage], add_messages]`.
+Dispatcher journal lịch sử theo chain ở namespace `conversations`; scoped context
+chỉ cấp lịch sử cho Communicator, Analyze và Finalize. Các agent còn lại nhận brief
+và shared contracts. Dashboard hiển thị hội thoại cho người dùng đã xác thực.
+Đây là giới hạn cấp context, không phải sandbox filesystem giữa các process.
+
+Analyze chỉ được giao cho Communicator hoặc Plan & Delegate. JSON Schema của
+Decision pass và Dispatcher cùng áp dụng quy tắc này; câu hỏi cho human phải qua
+task Communicator. Nếu Qwen chọn sai nơi nhận, runtime yêu cầu sửa lại Decision
+pass với cùng kết quả Work pass. Số lượt quyết định tối đa theo `max_attempts` của
+task (mặc định 3, tính cả lượt đầu); các đề xuất bị loại không tạo task hoặc tiêu
+tốn backward budget. Nếu vẫn sai, lượt chạy báo lỗi để xử lý theo retry kỹ thuật.
+
 ## Cấu hình
 
 | Biến | Ý nghĩa |
@@ -57,6 +85,7 @@ Các kiểm thử tự động dùng Qwen subprocess giả lập hoặc Git repo
 | `MAX_QWEN_SESSIONS` | 1–5 phiên Qwen đồng thời trên Agent Server |
 | `MAX_BACKWARD_DELEGATIONS` | Tối đa 3 lần quay ngược trên execution chain |
 | `MAX_TECHNICAL_RETRIES` | Retry kỹ thuật riêng; mặc định 3 |
+| `HUMAN_RESPONSE_TIMEOUT_SECONDS` | Thời gian chờ human của Communicator; mặc định 1800 giây |
 | `TASK_LEASE_SECONDS` | Thời hạn lease task; heartbeat gia hạn |
 | `WORKSPACE_ROOT` | Git repositories, worktrees và artifacts |
 | `DATA_ROOT` | Journal Dispatcher và dữ liệu runtime phát triển |

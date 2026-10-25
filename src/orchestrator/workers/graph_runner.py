@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from langchain_core.messages import messages_from_dict
 from typing import Any, Callable
 
 
@@ -16,10 +17,13 @@ async def run_graph(
     on_progress: Callable | None = None,
 ) -> dict:
     result = None
+    state = {"task": task, "context": context, "cwd": cwd}
+    if agent == "COMMUNICATOR":
+        state["Messages"] = messages_from_dict(context.get("Messages", []))
     async for chunk in client.runs.stream(
         thread_id,
         agent.lower(),
-        input={"task": task, "context": context, "cwd": cwd},
+        input=state,
         stream_mode=["values", "custom"],
         on_disconnect="cancel",
     ):

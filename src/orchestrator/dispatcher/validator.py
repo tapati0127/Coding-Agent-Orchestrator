@@ -1,10 +1,12 @@
 from orchestrator.schemas.task_graph import Agent
+from orchestrator.schemas.delegation import validate_delegation
 
 
 RANK = {a: i for i, a in enumerate(Agent)}
 
 
 def validate_dag(graph, existing):
+    validate_delegation(graph)
     nodes = {n.id: n for n in graph.nodes}
     task_ids = {n.id for n in graph.nodes if n.node_type == "TASK"}
     adjacency = {key: [] for key in task_ids}
@@ -34,8 +36,6 @@ def validate_dag(graph, existing):
     for key in adjacency:
         visit(key)
     for node in graph.nodes:
-        if node.node_type == "TASK" and node.target_agent == Agent.COMMUNICATOR:
-            raise ValueError("use human_request/notification, not Communicator tasks")
         if node.node_type != "TASK" and node.target_agent != Agent.COMMUNICATOR:
             raise ValueError("non-task nodes must target Communicator")
         for ref in node.context_refs:
@@ -44,11 +44,16 @@ def validate_dag(graph, existing):
 
 
 def backward_request(graph):
+    # Human intake/resumption is transport, not another agent delegation.
+    if graph.source_task_id == "human":
+        return False
     backwards = [n for n in graph.nodes if n.node_type == "TASK"
-                 and RANK[n.target_agent] < RANK[graph.producer_agent]]
+                 and (RANK[n.target_agent] < RANK[graph.producer_agent]
+                      or n.target_agent == graph.producer_agent == Agent.COMMUNICATOR)]
     if any(not n.reason for n in backwards):
         raise ValueError("backward delegation requires reason")
-    return bool(backwards)
+    return bool(backwards) or (graph.producer_agent == Agent.COMMUNICATOR
+                              and graph.human_request is not None)
 
 
 def validate_authoritative_dag(tasks):

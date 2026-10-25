@@ -7,6 +7,7 @@ from typing import Any
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _AGENTS = {"COMMUNICATOR", "ANALYZE", "PLAN_DELEGATE", "EXECUTE", "VERIFY_INTEGRATE", "FINALIZE"}
+CONVERSATION_READERS = frozenset({"COMMUNICATOR", "ANALYZE", "FINALIZE"})
 
 
 def identifier(value: str) -> str:
@@ -32,6 +33,7 @@ class ScopedContext:
         thread_id: str,
         worker_id: str | None = None,
         context_refs: list[str] | tuple[str, ...] = (),
+        execution_chain_id: str | None = None,
     ) -> dict:
         project_id, thread_id = identifier(project_id), identifier(thread_id)
         agent = str(agent).upper()
@@ -68,8 +70,15 @@ class ScopedContext:
                 ns += (identifier(worker_id),)
             ns += (thread_id,)
             private = await self._store.search(ns, limit=1000)
-        return {
+        result = {
             "shared": await self._store.search(shared_ns, limit=1000),
             "private": private,
             "references": refs,
         }
+        if execution_chain_id and agent in CONVERSATION_READERS:
+            conversation = await self._store.get(
+                ("coding", project_id, "conversations"), identifier(execution_chain_id))
+            if conversation:
+                result["Messages"] = conversation.get("Messages", [])
+                result["human_response_timed_out"] = conversation.get("human_response_timed_out", False)
+        return result

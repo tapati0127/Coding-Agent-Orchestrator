@@ -1,66 +1,36 @@
-"""The Communicator uses deterministic Python and never starts Qwen Code."""
+"""User-facing LLM graph. Dispatcher owns delegation and conversation persistence."""
+from typing import Annotated
 
-from typing import Any
-
+from langchain_core.messages import AIMessage, AnyMessage, messages_to_dict
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
 
 from orchestrator.graphs.common import AgentState
+from orchestrator.runtime.qwen import QwenRunner
 
 
-def communicator_output(
-    project_id: str,
-    message: str,
-    execution_chain_id: str,
-    source_task_id: str = "human",
-    target_agent: str = "ANALYZE",
-) -> dict[str, Any]:
-    if target_agent not in {"ANALYZE", "PLAN_DELEGATE"}:
-        raise ValueError("Human intake can delegate only to Analyze or Plan")
-    if not message.strip():
-        raise ValueError("A human message is required")
-    return {
-        "schema_version": "1.0",
-        "project_id": project_id,
-        "source_task_id": source_task_id,
-        "producer_agent": "COMMUNICATOR",
-        "execution_chain_id": execution_chain_id,
-        "summary": message,
-        "source_result": None,
-        "nodes": [
-            {
-                "id": "human-request",
-                "node_type": "TASK",
-                "target_agent": target_agent,
-                "title": "Analyze the human request" if target_agent == "ANALYZE" else "Plan the approved request",
-                "description": message,
-                "acceptance_criteria": ["Address the human request and identify acceptance criteria"],
-                "priority": 2,
-                "context_refs": [],
-                "artifact_refs": [],
-            }
-        ],
-        "edges": [],
-        "human_request": None,
-        "shared_updates": [],
-        "private_updates": [],
-        "notification": None,
-    }
+class CommunicatorState(AgentState):
+    Messages: Annotated[list[AnyMessage], add_messages]
 
 
-def communicate(state: AgentState) -> dict[str, Any]:
-    task, context = state.get("task", {}), state.get("context", {})
-    return {
-        "result": communicator_output(
-            project_id=task["project_id"],
-            message=context.get("message", task.get("description", "")),
-            execution_chain_id=task["execution_chain_id"],
-            source_task_id=task.get("task_id", "human"),
-            target_agent=context.get("target_agent", "ANALYZE"),
-        )
-    }
+async def communicate(state: CommunicatorState) -> dict:
+    task = state["task"]
+    if task.get("agent") != "COMMUNICATOR":
+        raise ValueError("Communicator cannot run a task assigned to another agent")
+    context = {**state.get("context", {}), "Messages": messages_to_dict(state.get("Messages", []))}
+    output = await QwenRunner().run(task=task, context=context, cwd=state["cwd"])
+    # Checkpoints contain the current turn. The Dispatcher journals accepted
+    # messages in the conversation so later tasks/threads see the same history.
+    human_request = output.get("human_request")
+    notification = output.get("notification")
+    approval = next((node for node in output.get("nodes", [])
+                     if node.get("node_type") == "HUMAN_APPROVAL"), {})
+    reply = ((human_request or {}).get("question") or approval.get("description") or approval.get("title")
+             or (notification or {}).get("message") or output.get("summary"))
+    return {"result": output, "Messages": [AIMessage(content=reply, id=task["task_id"])] if reply else []}
 
 
-builder = StateGraph(AgentState)
+builder = StateGraph(CommunicatorState)
 builder.add_node("communicate", communicate)
 builder.add_edge(START, "communicate")
 builder.add_edge("communicate", END)

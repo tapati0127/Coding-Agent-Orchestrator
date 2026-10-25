@@ -4,7 +4,9 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from orchestrator.graphs import common
-from orchestrator.graphs.communicator import communicator_output, graph as communicator
+from orchestrator.graphs import communicator as communicator_module
+from orchestrator.graphs.communicator import graph as communicator
+from langchain_core.messages import AIMessage, HumanMessage
 from orchestrator.schemas.task_graph import TaskGraphOutput
 from orchestrator.workers.graph_runner import run_graph
 from orchestrator.workers.polling import ReceiptTimeout, submit_request
@@ -12,26 +14,37 @@ from orchestrator.workers.main import Worker
 from orchestrator.store import InMemoryStore
 
 
-def test_communicator_protocol_requires_no_qwen(monkeypatch):
-    runner = Mock(side_effect=AssertionError("Communicator must never use Qwen"))
-    monkeypatch.setattr(common, "QwenRunner", runner)
-    output = communicator_output("demo", "Implement an API", "chain-1")
-    checked = TaskGraphOutput.model_validate(output)
-    assert checked.producer_agent == "COMMUNICATOR"
-    assert checked.source_result is None
-    assert checked.nodes[0].target_agent == "ANALYZE"
-    runner.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_communicator_graph_is_deterministic_and_single_role(monkeypatch):
-    monkeypatch.setattr(common, "QwenRunner", Mock(side_effect=AssertionError("No model")))
+@pytest.mark.parametrize("human_node", [False, True])
+async def test_communicator_calls_llm_with_typed_messages(monkeypatch, tmp_path, human_node):
+    expected = {
+        "project_id": "demo", "source_task_id": "task-1", "producer_agent": "COMMUNICATOR",
+        "execution_chain_id": "chain-1", "source_result": {"outcome": "SUCCESS"},
+        "summary": "Clarify the audience", "human_request": {"question": "Who will use it?"},
+    }
+    if human_node:
+        expected.pop("human_request")
+        expected["nodes"] = [{"id": "ask", "node_type": "HUMAN_APPROVAL", "target_agent": "COMMUNICATOR",
+                              "title": "Who will use it?"}]
+    runtime = SimpleNamespace(run=AsyncMock(return_value=expected))
+    monkeypatch.setattr(communicator_module, "QwenRunner", lambda: runtime)
     output = await communicator.ainvoke({
-        "task": {"project_id": "demo", "execution_chain_id": "chain-1"},
-        "context": {"message": "Add health check"},
+        "task": {"task_id": "task-1", "agent": "COMMUNICATOR"},
+        "context": {"delegation": {"backward_count": 0, "max_backward_delegations": 3}},
+        "cwd": str(tmp_path), "Messages": [HumanMessage(content="Build a portal", id="human-1")],
     })
-    assert output["result"]["nodes"][0]["description"] == "Add health check"
+    assert isinstance(output["Messages"][0], HumanMessage)
+    assert isinstance(output["Messages"][1], AIMessage)
+    assert output["Messages"][1].content == "Who will use it?"
+    assert runtime.run.call_args.kwargs["context"]["Messages"][0]["data"]["content"] == "Build a portal"
     assert set(communicator.get_graph().nodes) == {"__start__", "communicate", "__end__"}
+
+
+async def test_communicator_rejects_wrong_role_before_llm(monkeypatch, tmp_path):
+    runner = Mock(side_effect=AssertionError("Must validate role first"))
+    monkeypatch.setattr(communicator_module, "QwenRunner", runner)
+    with pytest.raises(ValueError, match="another agent"):
+        await communicator.ainvoke({"task": {"agent": "EXECUTE"}, "cwd": str(tmp_path)})
+    runner.assert_not_called()
 
 
 @pytest.mark.asyncio

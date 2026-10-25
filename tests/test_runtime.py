@@ -103,12 +103,12 @@ async def test_graph_runtime_performs_no_blocking_filesystem_io(tmp_path):
     assert output["source_task_id"] == "task1"
 
 
-async def test_missing_credentials_and_communicator_never_start_qwen(tmp_path):
+async def test_missing_credentials_and_unknown_agent_never_start_qwen(tmp_path):
     qwen = QwenRunner(api_key="", base_url="", model="", data_root=tmp_path)
     with pytest.raises(QwenError, match="Configure"):
         await qwen.run(source_task(), {}, str(tmp_path))
-    with pytest.raises(QwenError, match="agents 1–5"):
-        await runner(tmp_path, "not-an-executable").run(source_task("COMMUNICATOR"), {}, str(tmp_path))
+    with pytest.raises(QwenError, match="Unknown Qwen agent"):
+        await runner(tmp_path, "not-an-executable").run(source_task("UNKNOWN"), {}, str(tmp_path))
 
 
 async def test_shared_global_session_limit_across_runner_instances(tmp_path, monkeypatch):
@@ -296,3 +296,89 @@ async def test_pinned_actual_cli_two_pass_openai_protocol_and_decision_tools(tmp
         await asyncio.to_thread(server.shutdown)
         server.server_close()
         thread.join(timeout=2)
+
+
+async def test_communicator_two_passes_use_own_prompt_and_exclude_code_tools(tmp_path):
+    output = result_graph()
+    output.update(producer_agent="COMMUNICATOR", nodes=[{
+        "id": "analyze", "target_agent": "ANALYZE", "title": "Analyze clarified request"}])
+    executable = fake_cli(tmp_path, '''import json, sys
+prompt = sys.argv[sys.argv.index('--prompt') + 1]
+assert "the user's representative" in prompt
+assert 'PRIVATE_HISTORY_MARKER' in prompt
+for tool in ['read_file', 'run_shell_command', 'edit', 'write_file', 'agent', 'web_fetch']:
+    assert tool in sys.argv
+if '--json-schema' in sys.argv:
+    print(json.dumps({'type': 'result', 'result': 'decision', 'structured_result': ''' + repr(output) + '''}))
+else:
+    print(json.dumps({'type': 'result', 'result': 'The user wants a customer portal.'}))
+''')
+    qwen = runner(tmp_path, executable)
+    result = await qwen.run(source_task("COMMUNICATOR"), {
+        "Messages": [{"type": "human", "data": {"content": "PRIVATE_HISTORY_MARKER"}}],
+        "delegation": {"backward_count": 0, "max_backward_delegations": 3},
+    }, str(tmp_path))
+    assert result["nodes"][0]["target_agent"] == "ANALYZE"
+    assert [p["phase"] for p in qwen.last_run["passes"]] == ["work", "decision"]
+
+
+async def test_qwen_runtime_drops_conversation_for_execute_even_if_supplied(tmp_path):
+    executable = fake_cli(tmp_path, '''import json, sys
+assert 'PRIVATE_HISTORY_MARKER' not in sys.argv[sys.argv.index('--prompt') + 1]
+print(json.dumps({'type':'result', 'result':'ok', 'structured_result': ''' + repr(result_graph()) + '''}))
+''')
+    await runner(tmp_path, executable).run(source_task(), {
+        "Messages": [{"type": "human", "data": {"content": "PRIVATE_HISTORY_MARKER"}}],
+    }, str(tmp_path))
+
+
+@pytest.mark.parametrize("target,outcome", [("COMMUNICATOR", "NEED_ANALYSIS"), ("PLAN_DELEGATE", "SUCCESS")])
+async def test_analyze_repairs_wrong_route_without_repeating_work(tmp_path, target, outcome):
+    invalid = {**result_graph(), "producer_agent": "ANALYZE", "nodes": [
+        {"id": "next", "target_agent": "EXECUTE", "title": "Implement immediately"}]}
+    corrected = {**invalid, "source_result": {"outcome": outcome}, "nodes": [
+        {"id": "next", "target_agent": target, "title": "Clarify or plan the brief", "reason": "Resolve scope before implementation"}]}
+    executable = fake_cli(tmp_path, '''import json, sys
+from pathlib import Path
+prompt = sys.argv[sys.argv.index('--prompt') + 1]
+if '--json-schema' not in sys.argv:
+    count = Path('work-count')
+    assert not count.exists(), 'Work pass must not be repeated'
+    count.write_text('1')
+    print(json.dumps({'type': 'result', 'result': 'WORK_RESULT_SENTINEL'}))
+else:
+    schema = json.load(open(sys.argv[sys.argv.index('--json-schema')+1][1:]))
+    assert schema['$defs']['GraphNode']['properties']['target_agent']['enum'] == ['COMMUNICATOR', 'PLAN_DELEGATE']
+    assert 'ANALYZE' in schema['$defs']['Agent']['enum']
+    counter = Path('decision-count')
+    attempt = int(counter.read_text()) + 1 if counter.exists() else 1
+    counter.write_text(str(attempt))
+    output = ''' + repr(invalid) + '''
+    if attempt == 2:
+        assert 'DELEGATION CORRECTION REQUIRED' in prompt
+        assert 'WORK_RESULT_SENTINEL' in prompt
+        assert 'Do not merely rename' in prompt
+        output = ''' + repr(corrected) + '''
+    print(json.dumps({'type': 'result', 'result': 'decision', 'structured_result': output}))
+''')
+    qwen = runner(tmp_path, executable)
+    result = await qwen.run(source_task("ANALYZE"), {}, str(tmp_path))
+    assert result["nodes"][0]["target_agent"] == target
+    assert result["source_result"]["outcome"] == outcome
+    assert [p["phase"] for p in qwen.last_run["passes"]] == ["work", "decision", "decision-repair-1"]
+    assert (tmp_path / "work-count").read_text() == "1"
+    assert (tmp_path / "decision-count").read_text() == "2"
+
+
+async def test_analyze_invalid_route_repairs_are_bounded_and_release_slot(tmp_path):
+    invalid = {**result_graph(), "producer_agent": "ANALYZE", "nodes": [
+        {"id": "next", "target_agent": "FINALIZE", "title": "Skip planning"}]}
+    executable = fake_cli(tmp_path, "import json\nprint(json.dumps({'type':'result', 'result':'ok', 'structured_result':" + repr(invalid) + "}))\n")
+    qwen = runner(tmp_path, executable, max_sessions=1)
+    with pytest.raises(QwenError, match="after 2 decision attempts"):
+        await qwen.run({**source_task("ANALYZE"), "max_attempts": 2}, {}, str(tmp_path))
+    assert [p["phase"] for p in qwen.last_run["passes"]] == ["work", "decision", "decision-repair-1"]
+    valid = {**invalid, "nodes": [{"id": "plan", "target_agent": "PLAN_DELEGATE", "title": "Plan the work"}]}
+    fake_cli(tmp_path, "import json\nprint(json.dumps({'type':'result', 'result':'ok', 'structured_result':" + repr(valid) + "}))\n")
+    result = await asyncio.wait_for(qwen.run(source_task("ANALYZE"), {}, str(tmp_path)), timeout=5)
+    assert result["nodes"][0]["target_agent"] == "PLAN_DELEGATE"

@@ -21,6 +21,13 @@ def main():
     payload = next(json.loads(line) for line in prompt.splitlines() if line.startswith('{"task":'))
     task, context = payload["task"], payload["context"]
     agent = task["agent"]
+    if agent in {"COMMUNICATOR", "ANALYZE", "FINALIZE"}:
+        assert context["Messages"][0]["type"] == "human"
+        assert "Build independent API and UI" in context["Messages"][0]["data"]["content"]
+    else:
+        assert "Messages" not in context
+    if agent == "COMMUNICATOR":
+        assert not Path(".git").exists()
     if "--json-schema" not in sys.argv:
         emit({"type": "assistant", "fixture_phase": "start", "at": time.time(), "message": "fixture work"})
         if agent == "EXECUTE":
@@ -46,7 +53,9 @@ def main():
         "source_result": {"outcome": "SUCCESS", "proposed_status": "DONE"},
         "nodes": [], "edges": [],
     }
-    if agent == "ANALYZE":
+    if agent == "COMMUNICATOR":
+        output["nodes"] = [{"id": "analyze", "target_agent": "ANALYZE", "title": "Analyze fixture request", "description": "Build independent API and UI, then integrate and accept both."}]
+    elif agent == "ANALYZE":
         output["nodes"] = [{"id": "plan", "target_agent": "PLAN_DELEGATE", "title": "Plan fixture feature"}]
     elif agent == "PLAN_DELEGATE":
         output["nodes"] = [

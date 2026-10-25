@@ -12,9 +12,10 @@ import re
 import time
 import uuid
 from pathlib import Path
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, messages_to_dict
 
 from orchestrator.schemas.task import Task
-from orchestrator.schemas.task_graph import Agent, Outcome, Status, TaskGraphOutput
+from orchestrator.schemas.task_graph import Agent, HumanRequest, Outcome, Status, TaskGraphOutput
 from .dag_scheduler import ready_tasks, resolved_task
 from .transitions import transition
 from .validator import backward_request, validate_dag, validate_authoritative_dag
@@ -26,13 +27,17 @@ def identifier(request_id, suffix):
 
 class Dispatcher:
     def __init__(self, store, *, max_qwen_sessions=5, max_execute_workers=5,
-                 max_backward=3, max_attempts=3, lease_seconds=600, clock=time.time):
+                 max_backward=3, max_attempts=3, lease_seconds=600,
+                 human_response_timeout_seconds=1800, clock=time.time):
         if not 1 <= max_qwen_sessions <= 5 or not 1 <= max_execute_workers <= 5:
             raise ValueError("Qwen and Execute limits must be 1..5")
         self.store, self.clock = store, clock
         self.max_qwen_sessions, self.max_execute_workers = max_qwen_sessions, max_execute_workers
         self.max_backward, self.max_attempts = max_backward, max_attempts
         self.lease_seconds = lease_seconds
+        if human_response_timeout_seconds <= 0:
+            raise ValueError("Human response timeout must be positive")
+        self.human_response_timeout_seconds = human_response_timeout_seconds
         self.lock = asyncio.Lock()
 
     async def tasks(self, project_id):
@@ -139,24 +144,54 @@ class Dispatcher:
             message = payload.get("message", "").strip()
             if not message or len(message) > 50000:
                 raise ValueError("message must be 1..50000 characters")
+            chain_id = identifier(rid, "chain")
+            await self._conversation(put, pid, chain_id, HumanMessage(content=message, id=rid))
             graph = TaskGraphOutput(project_id=pid, source_task_id="human",
-                producer_agent=Agent.COMMUNICATOR, execution_chain_id=identifier(rid, "chain"),
-                summary=message, nodes=[{"id": "analyze", "target_agent": "ANALYZE",
-                    "title": "Analyze human request", "description": message}])
+                producer_agent=Agent.COMMUNICATOR, execution_chain_id=chain_id,
+                summary="New user request", nodes=[{"id": "communicate", "target_agent": "COMMUNICATOR",
+                    "title": "Understand the user's request",
+                    "description": "Read the authorized conversation and clarify the user's desired outcome."}])
             return await self._graph(e, graph, tasks, put)
-        if kind == "approval":
+        if kind in ("approval", "approval_timeout"):
             if agent != Agent.COMMUNICATOR:
                 raise ValueError("only Communicator submits human decisions")
             approval_id = payload.get("approval_id")
             approval = await self.store.get((*ns, "approvals"), approval_id)
             if not approval or approval["status"] != "PENDING":
                 raise ValueError("approval is missing or already resolved")
+            expires = approval.get("expires_at")
+            timed_out = kind == "approval_timeout"
+            if timed_out and (expires is None or self.clock() < expires):
+                raise ValueError("approval has not expired")
+            if not timed_out and expires is not None and self.clock() >= expires:
+                raise ValueError("approval expired; Communicator will continue with explicit assumptions")
             decision = payload.get("decision")
-            if decision not in ("approve", "reject"):
+            if not timed_out and decision not in ("approve", "reject"):
                 raise ValueError("invalid approval decision")
-            approval.update(status="APPROVED" if decision == "approve" else "REJECTED",
-                            answer=str(payload.get("answer", ""))[:10000])
+            answer = str(payload.get("answer", ""))[:10000]
+            if not timed_out and decision == "approve" and not answer.strip():
+                answer = "Confirmed."  # An explicit click, never an inferred approval.
+            status = "TIMED_OUT" if timed_out else "APPROVED" if decision == "approve" else "REJECTED"
+            approval.update(status=status, answer=answer, resolved_at=self.clock())
             put((*ns, "approvals"), approval_id, approval)
+            if approval.get("producer_agent") == Agent.COMMUNICATOR:
+                chain_id = approval["execution_chain_id"]
+                if timed_out:
+                    message = SystemMessage(content="The human response deadline expired. Continue to Analyze "
+                        "with explicit assumptions; no human approval was given.", id=rid)
+                else:
+                    message = HumanMessage(content=answer or "Rejected.", id=rid)
+                await self._conversation(put, pid, chain_id, message, timed_out=timed_out)
+                if decision == "reject":
+                    return {"approval_id": approval_id}
+                # A reply/timeout resumes the SAME chain. It does not spend or
+                # reset the budget already charged when asking the question.
+                graph = TaskGraphOutput(project_id=pid, source_task_id="human",
+                    producer_agent=Agent.COMMUNICATOR, execution_chain_id=chain_id,
+                    summary="Resume user conversation", nodes=[{"id": "resume",
+                        "target_agent": "COMMUNICATOR", "title": "Continue the user conversation",
+                        "description": "Read the authorized conversation and continue after the human response or timeout."}])
+                return await self._graph(e, graph, tasks, put)
             if decision == "reject":
                 return {"approval_id": approval_id}
             # Human approval starts a new chain, preserving the prior budget and
@@ -237,12 +272,25 @@ class Dispatcher:
         if source and graph.source_result is None:
             raise ValueError("source result required")
         validate_dag(graph, tasks)
+        if source and graph.producer_agent == Agent.COMMUNICATOR:
+            self._validate_communicator(graph)
         back = backward_request(graph)
         chain = await self.store.get((*ns, "chains"), graph.execution_chain_id) or {
             "execution_chain_id": graph.execution_chain_id, "backward_count": 0}
         overflow = back and chain["backward_count"] >= self.max_backward
+        if source and graph.producer_agent == Agent.COMMUNICATOR:
+            conversation = await self.store.get((*ns, "conversations"), graph.execution_chain_id) or {}
+            if back and (overflow or conversation.get("human_response_timed_out")):
+                raise ValueError("Communicator must hand off to Analyze with explicit assumptions after timeout or exhausted backward budget")
+            if (conversation.get("human_response_timed_out") or chain["backward_count"] >= self.max_backward) and not graph.notification:
+                raise ValueError("Communicator must notify the user of assumptions after timeout or exhausted backward budget")
+            reply = (graph.human_request.question if graph.human_request else
+                     graph.notification.message if graph.notification else graph.summary)
+            if reply:
+                await self._conversation(put, pid, graph.execution_chain_id, AIMessage(content=reply, id=rid))
         if back and not overflow:
             chain["backward_count"] += 1
+        chain["max_backward_delegations"] = self.max_backward
         if graph.shared_updates or graph.private_updates:
             self._validate_updates(graph)
         if source:
@@ -398,7 +446,41 @@ class Dispatcher:
         put((*ns, "approvals"), aid, {"approval_id": aid, "project_id": graph.project_id,
             "question": question, "status": "PENDING", "source_task_id": graph.source_task_id,
             "execution_chain_id": graph.execution_chain_id, "context": graph.summary,
+            "producer_agent": graph.producer_agent.value,
+            "reason": graph.human_request.reason if graph.human_request else "human_intervention",
+            "options": graph.human_request.options if graph.human_request else [],
+            "expires_at": self.clock() + self.human_response_timeout_seconds if graph.producer_agent == Agent.COMMUNICATOR else None,
             "created_at": self.clock()})
+
+    async def _conversation(self, put, pid, chain_id, message, *, timed_out=None):
+        ns = ("coding", pid, "conversations")
+        record = await self.store.get(ns, chain_id) or {
+            "execution_chain_id": chain_id, "Messages": [], "created_at": self.clock()}
+        record["Messages"].extend(messages_to_dict([message]))
+        if timed_out is not None:
+            record["human_response_timed_out"] = timed_out
+        put(ns, chain_id, record)
+
+    @staticmethod
+    def _validate_communicator(graph):
+        # Support the existing HUMAN_APPROVAL node representation too, but one
+        # decision must never create multiple questions or parallel intake tasks.
+        if len(graph.nodes) == 1 and graph.nodes[0].node_type == "HUMAN_APPROVAL" and not graph.human_request:
+            node = graph.nodes[0]
+            graph.human_request = HumanRequest(question=node.description or node.title)
+            graph.nodes = []
+        if graph.edges or graph.shared_updates or graph.private_updates:
+            raise ValueError("Communicator must hand off a brief, not publish conversation updates or a DAG")
+        if graph.source_result.outcome != Outcome.SUCCESS:
+            raise ValueError("A completed Communicator turn must report SUCCESS; waiting is an approval")
+        if graph.human_request:
+            if graph.nodes:
+                raise ValueError("Communicator must choose either a human question or one task")
+        elif (len(graph.nodes) != 1 or graph.nodes[0].node_type != "TASK"
+              or graph.nodes[0].target_agent not in {Agent.COMMUNICATOR, Agent.ANALYZE}):
+            raise ValueError("Communicator may delegate only to itself, human or Analyze")
+        if graph.source_result.artifact_refs or any(n.artifact_refs or n.context_refs for n in graph.nodes):
+            raise ValueError("Communicator cannot publish conversation artifacts or references")
 
     @staticmethod
     def _validate_updates(graph):
@@ -410,6 +492,8 @@ class Dispatcher:
             if secret and secret in text:
                 raise ValueError("secrets cannot be stored in context")
         for update in graph.shared_updates:
+            if update.key.lower() in {"messages", "conversation_history"}:
+                raise ValueError("conversation history cannot be promoted to shared context")
             if any(word in update.key.lower() for word in ("secret", "token", "api_key", "private")):
                 raise ValueError("shared promotion rejected by scope policy")
             if not update.reason:
@@ -475,6 +559,12 @@ class Dispatcher:
     async def recover(self, project_id):
         async with self.lock:
             await self.replay(project_id)
+            for approval in await self.store.search(("coding", project_id, "approvals")):
+                if (approval.get("status") == "PENDING" and approval.get("expires_at") is not None
+                        and approval["expires_at"] <= self.clock()):
+                    await self._handle({"request_id": identifier(approval["approval_id"], "timeout"),
+                        "project_id": project_id, "agent": "COMMUNICATOR", "kind": "approval_timeout",
+                        "payload": {"approval_id": approval["approval_id"]}})
             for task in (await self.tasks(project_id)).values():
                 if (task.status in (Status.DOING, Status.IN_REVIEW)
                         and (task.lease_expires_at or 0) <= self.clock()):

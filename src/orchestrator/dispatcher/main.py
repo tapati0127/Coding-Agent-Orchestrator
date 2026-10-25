@@ -21,7 +21,8 @@ async def run():
             max_execute_workers=int(os.getenv("MAX_EXECUTE_WORKERS", "5")),
             max_backward=int(os.getenv("MAX_BACKWARD_DELEGATIONS", "3")),
             max_attempts=int(os.getenv("MAX_TECHNICAL_RETRIES", "3")),
-            lease_seconds=int(os.getenv("TASK_LEASE_SECONDS", "600")))
+            lease_seconds=int(os.getenv("TASK_LEASE_SECONDS", "600")),
+            human_response_timeout_seconds=int(os.getenv("HUMAN_RESPONSE_TIMEOUT_SECONDS", "1800")))
         while True:
             try:
                 # Discover exact request namespaces, including not-yet-registered

@@ -67,7 +67,7 @@ class Worker:
         for task_id in task.get("depends_on", []):
             visit(task_id)
         repository = project.get("repository_path")
-        if not repository:
+        if not repository or self.agent == "COMMUNICATOR":
             if self.agent not in {"COMMUNICATOR", "ANALYZE", "PLAN_DELEGATE"}:
                 raise ValueError("This agent requires a registered project repository")
             data_root = Path(os.getenv("DATA_ROOT", "/data")).resolve()
@@ -118,7 +118,13 @@ class Worker:
             context = await ScopedContext(self.store).build(
                 project_id=task["project_id"], agent=self.agent, thread_id=thread_id,
                 worker_id=self.worker_id, context_refs=task.get("context_refs", []),
+                execution_chain_id=task["execution_chain_id"],
             )
+            chain = await self.store.get(("coding", task["project_id"], "chains"), task["execution_chain_id"]) or {}
+            context["delegation"] = {
+                "backward_count": chain.get("backward_count", 0),
+                "max_backward_delegations": chain.get("max_backward_delegations", int(os.getenv("MAX_BACKWARD_DELEGATIONS", "3"))),
+            }
             # Dependency results are public task/artifact metadata, not private
             # graph state. Verify needs these to evaluate integration acceptance.
             context["predecessors"] = [

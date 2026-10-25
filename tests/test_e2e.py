@@ -148,9 +148,9 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
                 tasks = snapshot["tasks"]
                 failed_workers = [worker for worker in snapshot["workers"] if worker.get("status") == "FAILED"]
                 assert not failed_workers, f"Worker failed: {failed_workers}\n{first_log.read_text()[-16000:]}"
-                return snapshot if len(tasks) == 6 and all(t["status"] == "CLOSED" for t in tasks) else None
+                return snapshot if len(tasks) == 7 and all(t["status"] == "CLOSED" for t in tasks) else None
 
-            snapshot = wait_for(completed, timeout=60, description="all six tasks CLOSED",
+            snapshot = wait_for(completed, timeout=60, description="all seven tasks CLOSED",
                                 process=process, logfile=first_log)
             tasks = snapshot["tasks"]
             execute = [task for task in tasks if task["agent"] == "EXECUTE"]
@@ -162,7 +162,7 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             assert (integration / "api.txt").read_text() == "api implemented\n"
             assert (integration / "ui.txt").read_text() == "ui implemented\n"
             assert snapshot["notifications"]
-            assert not (data / "private" / "fixture" / "COMMUNICATOR").exists()
+            assert (data / "private" / "fixture" / "COMMUNICATOR").is_dir()
             for task in tasks:
                 runs = list((data / "private" / "fixture" / task["agent"] / task["task_id"]).iterdir())
                 assert len(runs) == 1
@@ -179,7 +179,7 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             assert len(patches) == 3
             preserved_patches = {path: path.read_bytes() for path in patches}
             threads = client.post("/threads/search", headers=trusted, json={"limit": 100}).json()
-            assert len(threads) == 6
+            assert len(threads) == 7
             checkpoint_id = threads[0]["thread_id"]
             state = client.get(f"/threads/{checkpoint_id}/state", headers=trusted).json()
             assert state["values"]["result"]["source_task_id"] in {task["task_id"] for task in tasks}

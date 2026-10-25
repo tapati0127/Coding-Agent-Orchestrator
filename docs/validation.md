@@ -2,6 +2,10 @@
 
 Tài liệu này phân biệt kiểm thử runtime thực với mô hình được giả lập. Kết quả phản ánh môi trường phát triển hiện tại; không suy ra độ bền sản xuất của `langgraph dev` hoặc chất lượng mô hình nội bộ.
 
+## Bằng chứng trước thay đổi Communicator LLM
+
+Các kết quả và số tests dưới đây là bằng chứng lịch sử của bản Communicator Python; không suy ra đã kiểm chứng lại bản Communicator LLM. Kiểm thử hiện tại có thêm intake LLM, shared backward budget, timeout và quyền đọc Messages.
+
 ## Đã kiểm chứng
 
 - `uv sync --frozen` cài dependencies theo lockfile; `uv lock --check` qua.
