@@ -11,7 +11,7 @@ from orchestrator.dispatcher.engine import identifier
 from langgraph.store.memory import InMemoryStore
 
 
-async def follow(monkeypatch, snapshots, *, previous_chain=None, approval=None, replay=False):
+async def follow(monkeypatch, snapshots, *, previous_chain=None, approval=None, replay=False, text="Build API"):
     store = InMemoryStore()
     await store.aput(("coding", "projects"), "p", {"project_id": "p"})
     request_id = identifier("user-1", "chat")
@@ -32,7 +32,7 @@ async def follow(monkeypatch, snapshots, *, previous_chain=None, approval=None, 
     monkeypatch.setattr(progress, "read_progress", reader)
     monkeypatch.setattr(progress.asyncio, "sleep", AsyncMock())
     events = []
-    human = HumanMessage(content="Build API", id="user-1")
+    human = HumanMessage(content=text, id="user-1")
     result = await progress.follow_progress({"project_id": "p", "messages": [human],
         "execution_chain_id": previous_chain}, runtime, [human], events.append, store=store)
     return result, runtime, dispatcher, events, reader
@@ -49,7 +49,7 @@ async def test_only_changes_invoke_model_and_final_status_ends_stream(monkeypatc
     assert runtime.chat.await_count == 2
     assert all(call.kwargs == {"stream": True} for call in runtime.chat.call_args_list)
     assert [e["status"] for e in events if e["type"] == "status"] == ["submitted", "running", "completed"]
-    assert "messages" not in result
+    assert len(result["messages"]) == 2
     dispatcher.submit.assert_awaited_once()
 
 
@@ -66,7 +66,7 @@ async def test_reply_resumes_pending_clarification_in_same_chain(monkeypatch):
     result, _, dispatcher, _, _ = await follow(monkeypatch, [
         snapshot("DONE", approvals=[pending]), snapshot("CLOSED")], previous_chain="chain",
         approval={**pending, "producer_agent": "COMMUNICATOR", "execution_chain_id": "chain"})
-    assert result == {"execution_chain_id": "chain"}
+    assert result["execution_chain_id"] == "chain"
     args = dispatcher.submit.call_args
     assert args.args == ("p", "human_reply", {"approval_id": "a1", "answer": "Build API"})
 
@@ -91,7 +91,7 @@ async def test_reopened_project_resumes_question_without_previous_thread(monkeyp
                "producer_agent": "COMMUNICATOR"}
     result, _, dispatcher, _, _ = await follow(monkeypatch, [
         snapshot("DONE", approvals=[pending]), snapshot("CLOSED")], approval=pending)
-    assert result == {"execution_chain_id": "saved-chain"}
+    assert result["execution_chain_id"] == "saved-chain"
     assert dispatcher.submit.call_args.args == ("p", "human_reply", {"approval_id": "a1", "answer": "Build API"})
 
 
@@ -123,8 +123,38 @@ async def test_first_message_registers_project_before_submitting_work_and_retry_
 async def test_retry_observes_original_chain_without_resubmitting_work(monkeypatch):
     result, _, dispatcher, _, _ = await follow(monkeypatch, [snapshot("CLOSED")],
                                                previous_chain="other", replay=True)
-    assert result == {"execution_chain_id": "original-chain"}
+    assert result["execution_chain_id"] == "original-chain"
     dispatcher.submit.assert_not_awaited()
+
+
+async def test_status_request_observes_chain_without_creating_work(monkeypatch):
+    result, _, dispatcher, _, _ = await follow(monkeypatch, [snapshot("CLOSED"), snapshot("CLOSED")],
+        previous_chain="existing-chain", text="tiến độ")
+    assert result["execution_chain_id"] == "existing-chain"
+    assert result["messages"]
+    dispatcher.submit.assert_not_awaited()
+
+
+async def test_technical_approval_can_be_resolved_by_explicit_chat_answer(monkeypatch):
+    pending = {"approval_id": "a1", "status": "PENDING", "producer_agent": "VERIFY_INTEGRATE",
+               "question": "Approve this decision?", "execution_chain_id": "chain"}
+    result, _, dispatcher, _, _ = await follow(monkeypatch, [
+        snapshot("DONE", approvals=[pending]), snapshot("CLOSED")], previous_chain="chain",
+        approval=pending, text="đồng ý")
+    assert dispatcher.submit.call_args.args == ("p", "approval", {
+        "approval_id": "a1", "decision": "approve", "answer": "đồng ý"})
+    assert result["execution_chain_id"] != "chain"
+
+
+async def test_technical_approval_is_not_inferred_from_unrelated_chat(monkeypatch):
+    pending = {"approval_id": "a1", "status": "PENDING", "producer_agent": "VERIFY_INTEGRATE",
+               "question": "Approve this decision?", "execution_chain_id": "chain"}
+    result, model, dispatcher, _, _ = await follow(monkeypatch, [snapshot("DONE", approvals=[pending])],
+        previous_chain="chain", approval=pending, text="Explain the options")
+    assert "Approve this decision?" in result["messages"][0].content
+    assert "đồng ý" in result["messages"][0].content
+    dispatcher.submit.assert_not_awaited()
+    model.chat.assert_not_awaited()
 
 
 async def test_graph_injects_store_into_subgraph_without_opening_sdk_client(monkeypatch):

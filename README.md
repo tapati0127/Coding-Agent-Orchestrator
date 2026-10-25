@@ -10,15 +10,15 @@ Cần Docker/Compose và một endpoint OpenAI-compatible mà container truy c�
 
 ```bash
 cp .env.example .env
-# Sửa QWEN_BASE_URL, QWEN_MODEL, QWEN_API_KEY và hai token trong .env.
-# ORCHESTRATOR_TOKEN và DASHBOARD_TOKEN phải khác nhau, đủ ngẫu nhiên.
+# Sửa QWEN_BASE_URL, QWEN_MODEL, QWEN_API_KEY và ORCHESTRATOR_TOKEN trong .env.
+# DASHBOARD_TOKEN chỉ cần nếu sử dụng dashboard; phải khác ORCHESTRATOR_TOKEN.
 docker compose up --build -d
 docker compose logs -f
 ```
 
-Dashboard nằm ở đường dẫn `/dashboard` trên port 2024. Compose mặc định chỉ bind port ra loopback của máy Docker; đổi binding trong môi trường mạng nội bộ có kiểm soát nếu cần. Nhập **DASHBOARD_TOKEN** vào giao diện. Không cung cấp ORCHESTRATOR_TOKEN cho trình duyệt.
+Chat trực tiếp với graph `communicator` qua LangGraph SDK, dùng **ORCHESTRATOR_TOKEN**. Agent Server nghe port 2024 bên trong container; dùng host/port được map trong `docker-compose.yml` khi kết nối từ máy host. `DASHBOARD_TOKEN` có thể để trống khi chỉ dùng SDK; các API dashboard khi đó bị khóa.
 
-Chọn **Dự án mới** rồi mô tả điều bạn muốn làm với Communicator, hoặc chọn một project cũ để tiếp tục. Khi gửi tin nhắn đầu tiên, hệ thống tự sinh project ID, tạo thư mục `WORKSPACE_ROOT/<project_id>` (mặc định `/workspace/<project_id>`) và khởi tạo Git cùng commit ban đầu. Không cần nhập ID, tên hay đường dẫn repository. Hội thoại và câu hỏi đang chờ được nạp lại khi mở project cũ. Execute workers tạo worktree riêng; Verify dùng worktree integration. API đăng ký repository có sẵn vẫn được giữ cho tích hợp.
+Ở đầu hội thoại, Communicator liệt kê các project để chọn bằng số thứ tự, tên hoặc ID. Nếu chưa có project, hoặc bạn nói **tạo project mới**, hệ thống tự sinh ID, tạo thư mục `WORKSPACE_ROOT/<project_id>` (mặc định `/workspace/<project_id>`) và khởi tạo Git cùng commit ban đầu. Lựa chọn được lưu vào `state.project_id` của thread. Execute workers tạo worktree riêng; Verify dùng worktree integration. API đăng ký repository có sẵn vẫn được giữ cho tích hợp.
 
 Sau khi dependencies/image/model đã được chuẩn bị, runtime không cần Internet công cộng; `QWEN_BASE_URL` và endpoint Decision (nếu cấu hình riêng) phải tiếp tục truy cập được. Image build vẫn cần các registry hệ điều hành, Python và npm. API key không được lưu vào image, prompt hay repository.
 
@@ -54,34 +54,49 @@ Các kiểm thử tự động dùng Qwen subprocess, phản hồi HTTP LLM gi�
 {"messages": [{"role": "user", "content": "Tôi muốn xây dựng portal cho khách hàng"}]}
 ```
 
-Subgraph `communicate` đọc lịch sử `messages` và gọi ChatOpenAI bằng `ainvoke`;
-không cần `task`, `cwd` hoặc Qwen Code. Câu trả lời phát qua stream, node không
-return `messages`. Client gửi lại lịch sử hiển thị với các message ID ổn định khi
-nhắn lượt tiếp theo. Dùng cùng thread để giữ execution chain của cuộc trao đổi.
+Client chỉ cần gửi **tin nhắn mới** trong `messages` trên cùng thread; không cần
+truyền `project_id`, `task`, `cwd` hoặc gửi lại assistant messages. Graph lưu cả
+câu trả lời vào state và phát stream khi có câu trả lời mới. Ví dụ với async SDK:
 
-Dashboard có khung chat, danh sách project cũ và nút **Dự án mới**, không có form tạo project thủ công. Route `/api/chat/stream` dùng
-LangGraph SDK gọi `runs.stream` với `stream_mode=["messages-tuple", "custom"]` và
-`stream_subgraphs=True`, rồi chuyển tiếp token và namespace subgraph tới browser.
-Browser chỉ giữ DASHBOARD_TOKEN trong bộ nhớ; runtime token nằm ở server.
+```python
+import os
+from langgraph_sdk import get_client
 
-Khi chọn dự án, Communicator gửi yêu cầu vào queue Dispatcher rồi đọc trực tiếp
-task/approval của execution chain qua `runtime.store` được LangGraph inject vào
-node `communicate(state, runtime: Runtime)`. Graph dùng API native `aget/asearch`,
-không mở SDK Store client. Agent Server cấp Store khi chạy graph; khi chạy local,
-truyền Store vào `builder.compile(store=store)` để LangGraph đưa xuống subgraph.
-Chỉ khi trạng thái thay đổi mới gọi
-LLM để báo tiến độ; heartbeat không làm phát sinh lời trả lời mới. Theo dõi kết
-thúc khi cả chain CLOSED, cần người dùng trả lời, hoặc không còn task chạy/đợi
-và trạng thái giữ nguyên qua nhiều lần đọc. Chat trả lời câu hỏi làm rõ tiếp tục
-cùng chain qua `human_reply` (câu hỏi chuyển `RESOLVED`, không tự đánh dấu phê
-duyệt). Dừng theo dõi hoặc đóng browser không hủy task nền.
+client = get_client(url=os.environ["LANGGRAPH_URL"], api_key=os.environ["ORCHESTRATOR_TOKEN"])
+thread = await client.threads.create()
+
+async def chat(text):
+    state = await client.runs.wait(thread["thread_id"], "communicator", input={
+        "messages": [{"role": "user", "content": text}]
+    })
+    print(state["messages"][-1]["content"])
+    return state
+
+await chat("Xin chào")        # Liệt kê project; nếu danh sách trống thì tự tạo.
+await chat("1")               # Chọn project số 1 khi vừa nhận danh sách.
+await chat("Thêm đăng nhập")  # Yêu cầu cho project đã chọn.
+```
+
+Nói **danh sách dự án** để chọn lại, hoặc **tạo project mới** để chuyển sang project
+mới trong cùng thread. Sau khi chọn, Communicator thông báo project và câu hỏi
+đang chờ (nếu có); tin nhắn tiếp theo tiếp tục quy trình. Lịch sử trao đổi của
+project được chuyển cho worker để không mất yêu cầu khi bắt đầu execution chain mới.
+
+Graph đọc catalog/task/approval qua `runtime.store` được LangGraph inject; mọi ghi
+project, task và conversation chính thức vẫn đi qua Dispatcher. Khi chạy local,
+truyền Store vào `builder.compile(store=store)` và dùng checkpointer để giữ state
+giữa các lượt. Agent Server tự cung cấp Store/checkpoint khi dùng cùng thread.
+Theo dõi kết thúc khi chain CLOSED, cần người dùng trả lời, hoặc bị chặn. Nói
+**tiến độ** hoặc **status** để xem chain hiện tại mà không tạo task mới. Trả lời
+câu hỏi làm rõ tiếp tục cùng chain qua `human_reply`; với quyết định kỹ thuật,
+trả lời rõ **đồng ý** hoặc **từ chối**. Đóng kết nối không hủy task nền.
 
 Communicator worker chạy hai lượt model: tạo câu trả lời hội thoại, rồi tạo
 `TaskGraphOutput` từ lịch sử và bản trả lời đó. Khi đủ rõ, Dispatcher kiểm tra và
 tạo task Analyze; nếu cần hỏi thêm, worker được nhả để chờ người dùng. Khi hết
 thời gian chờ, hệ thống vẫn tiếp tục sang Analyze và lưu thông báo timeout cùng
-các giả định. Dashboard theo dõi notification riêng cả sau khi lượt chat đã kết
-thúc chờ trả lời; mở lại project cũng đọc được các thông báo đã lưu.
+các giả định. Khi lượt chat đã kết thúc chờ trả lời, có thể nhắn **tiến độ** để đọc
+cập nhật và các thông báo timeout/giả định đã lưu.
 
 Supervisor tạo một queue kết quả chung và một queue nhận việc cho mỗi worker
 bằng `multiprocessing.Queue`, rồi khởi động các worker bằng

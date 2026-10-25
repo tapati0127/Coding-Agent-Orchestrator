@@ -1,5 +1,6 @@
 from pathlib import Path
 import signal
+from unittest.mock import Mock
 
 import pytest
 
@@ -75,6 +76,15 @@ def test_shutdown_sends_queue_sentinel_and_joins_worker_process(tmp_path):
 
 def test_missing_auth_stops_before_opening_server_port(tmp_path):
     supervisor = Supervisor(Settings(), cwd=tmp_path)
-    with pytest.raises(RuntimeError, match="distinct ORCHESTRATOR_TOKEN"):
+    with pytest.raises(RuntimeError, match="Set ORCHESTRATOR_TOKEN"):
         supervisor.run()
     assert supervisor.children == {}
+
+
+def test_runtime_only_startup_does_not_require_dashboard_token(tmp_path, monkeypatch):
+    reached = Mock(side_effect=OSError("Reached persistence initialization"))
+    monkeypatch.setattr("orchestrator.supervisor.prepare_persistence", reached)
+    supervisor = Supervisor(Settings(orchestrator_token="runtime-only"), cwd=tmp_path)
+    with pytest.raises(OSError, match="Reached persistence"):
+        supervisor.run()
+    reached.assert_called_once()

@@ -21,6 +21,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from langgraph_sdk import get_sync_client
 
 from fixtures.decision_fixture import decision_endpoint
 from orchestrator.dispatcher.engine import identifier
@@ -134,12 +135,17 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             assert client.get("/api/projects").status_code == 401
             assert client.post("/store/items/search", headers=headers,
                                json={"namespace_prefix": ["coding"], "limit": 10}).status_code in {401, 403}
-            with client.stream("POST", "/api/chat/stream", headers=headers, timeout=60, json={
-                "messages": [{"id": message_id, "role": "user",
-                "content": "Build independent API and UI, then integrate and accept both."}],
-            }) as response:
-                assert response.status_code == 200
-                frames = list(response.iter_lines())
+            sdk = get_sync_client(url=URL, api_key=internal_token)
+            thread = sdk.threads.create()
+            selected = sdk.runs.wait(thread["thread_id"], "communicator", input={"messages": [
+                {"id": message_id, "role": "user", "content": "tạo project mới"}]})
+            assert selected["project_id"] == pid
+            assert selected["messages"][-1]["type"] == "ai"
+            parts = list(sdk.runs.stream(thread["thread_id"], "communicator", input={"messages": [
+                {"id": str(uuid4()), "role": "user", "content": "Build independent API and UI, then integrate and accept both."}]},
+                stream_mode=["messages-tuple", "custom"], stream_subgraphs=True))
+            frames = [line for part in parts for line in (
+                f"event: {part.event}", json.dumps(part.data, ensure_ascii=False))]
             assert any(line.startswith("event: messages|communicate:") for line in frames), "\n".join(frames)[:10000]
             assert any('"status": "completed"' in line for line in frames), frames
             assert any('"type": "reply"' in line for line in frames), frames
@@ -189,7 +195,7 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             preserved_patches = {path: path.read_bytes() for path in patches}
             # Technical graphs run locally in worker processes, without server threads.
             threads = client.post("/threads/search", headers=trusted, json={"limit": 100}).json()
-            assert len(threads) == 1 and threads[0]["metadata"]["dashboard_chat"]
+            assert len(threads) == 1 and threads[0]["thread_id"] == thread["thread_id"]
             task_ids = {task["task_id"] for task in tasks}
         assert process.returncode == 0, first_log.read_text()[-6000:]
         # A fresh supervisor and Agent Server instance reattach the same data
@@ -205,5 +211,8 @@ def test_real_server_parallel_dag_auth_integration_and_graceful_restart(tmp_path
             assert (integration / "api.txt").read_text() == "api implemented\n"
             assert (integration / "ui.txt").read_text() == "ui implemented\n"
             assert all(path.read_bytes() == content for path, content in preserved_patches.items())
+            restored_thread = sdk.threads.get_state(thread["thread_id"])
+            assert restored_thread["values"]["project_id"] == pid
+            assert restored_thread["values"]["messages"][-1]["type"] == "ai"
         assert restarted.returncode == 0, restart_log.read_text()[-6000:]
         assert len([r for r in decision_requests if r.get("response_format")]) == 7

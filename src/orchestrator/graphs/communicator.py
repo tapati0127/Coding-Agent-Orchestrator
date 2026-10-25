@@ -15,6 +15,7 @@ from orchestrator.runtime.decision import DecisionRunner, safe_payload
 from orchestrator.schemas.delegation import decision_schema
 from orchestrator.schemas.task_graph import TaskGraphOutput
 from orchestrator.graphs.progress import follow_progress
+from orchestrator.graphs.projects import select_project, after_selection
 
 
 class CommunicatorState(AgentState, total=False):
@@ -22,6 +23,10 @@ class CommunicatorState(AgentState, total=False):
     project_id: str | None
     execution_chain_id: str | None
     create_project: bool
+    project_options: list[dict]
+    project_menu_message_id: str
+    project_control_turn_id: str
+    project_message_start: int
 
 
 def _role_prompt() -> str:
@@ -46,7 +51,9 @@ async def communicate(state: CommunicatorState, runtime: Runtime) -> dict:
             return await follow_progress(state, model, messages, writer, store=runtime.store)
         reply = await model.chat(messages, stream=True)
         writer({"type": "reply", "id": reply.id, "content": reply.content})
-        return {}
+        return {
+            "messages": [reply]
+        }
 
     # A Dispatcher-owned task needs the shared proposal protocol. Send the
     # conversation as real chat messages, without a Qwen Code work pass.
@@ -78,12 +85,14 @@ async def communicate(state: CommunicatorState, runtime: Runtime) -> dict:
              or (notification or {}).get("message") or output.get("summary"))
     if reply:
         writer({"type": "reply", "id": task["task_id"], "content": reply})
-    return {"result": output}
+    return {"result": output, "messages": [AIMessage(content=reply, id=task["task_id"])] if reply else []}
 
 
 conversation = StateGraph(CommunicatorState)
+conversation.add_node("select_project", select_project)
 conversation.add_node("respond", communicate)
-conversation.add_edge(START, "respond")
+conversation.add_edge(START, "select_project")
+conversation.add_conditional_edges("select_project", after_selection, {"respond": "respond", END: END})
 conversation.add_edge("respond", END)
 
 builder = StateGraph(CommunicatorState)

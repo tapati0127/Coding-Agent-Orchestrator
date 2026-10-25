@@ -41,7 +41,9 @@ async def test_communicator_task_calls_chat_llm_with_typed_messages(monkeypatch,
         "messages": [HumanMessage(content="Build a portal", id="human-1")],
     })
     assert isinstance(output["messages"][0], HumanMessage)
-    assert len(output["messages"]) == 1  # Replies are streamed, not returned to messages.
+    assert len(output["messages"]) == 2
+    assert isinstance(output["messages"][-1], AIMessage)
+    assert output["messages"][-1].content == "Who will use it?"
     runtime.ainvoke.assert_awaited_once()
     runtime.chat.assert_awaited_once()
     messages, schema = runtime.ainvoke.call_args.args
@@ -62,42 +64,50 @@ async def test_communicate_rejects_wrong_role_before_llm(monkeypatch):
 
 
 async def test_communicator_accepts_messages_without_task_or_cwd(monkeypatch):
-    runtime = SimpleNamespace(chat=AsyncMock(return_value=AIMessage(content="Chào bạn!")))
-    monkeypatch.setattr(communicator_module, "DecisionRunner", lambda: runtime)
+    from langgraph.store.memory import InMemoryStore as NativeStore
+    store = NativeStore()
+    await store.aput(("coding", "projects"), "portal", {"project_id": "portal", "title": "Portal"})
+    runner = Mock(side_effect=AssertionError("Project menu needs no LLM"))
+    monkeypatch.setattr(communicator_module, "DecisionRunner", runner)
     monkeypatch.setattr(common, "QwenRunner", Mock(side_effect=AssertionError("No Qwen Code for chat")))
-    chunks = [chunk async for chunk in communicator.astream(
+    graph = communicator_module.builder.compile(store=store)
+    chunks = [chunk async for chunk in graph.astream(
         {"messages": [{"role": "user", "content": "Xin chào"}]},
         stream_mode=["custom", "values"], subgraphs=True)]
     replies = [(namespace, data) for namespace, mode, data in chunks if mode == "custom"]
     assert replies[0][0]  # The reply originates inside the communicate subgraph.
-    assert replies[0][1]["content"] == "Chào bạn!"
+    assert "Portal" in replies[0][1]["content"]
+    assert "tạo project mới" in replies[0][1]["content"]
     output = [data for namespace, mode, data in chunks if mode == "values" and not namespace][-1]
-    assert len(output["messages"]) == 1 and "result" not in output
-    assert runtime.chat.call_args.kwargs == {"stream": True}
-    history = runtime.chat.call_args.args[0]
-    assert isinstance(history[0], SystemMessage)
-    assert "the user's representative" in history[0].content
-    assert isinstance(history[-1], HumanMessage)
-    assert history[-1].content == "Xin chào"
+    assert len(output["messages"]) == 2 and "result" not in output
+    assert not output.get("project_id")
+    runner.assert_not_called()
 
 
 async def test_communicator_reads_previous_turns_in_the_same_thread(monkeypatch):
-    runtime = SimpleNamespace(chat=AsyncMock(side_effect=[
-        AIMessage(content="Ai sẽ dùng portal?", id="ai-1"),
-        AIMessage(content="Mình đã ghi nhận khách hàng là người dùng.", id="ai-2"),
-    ]))
-    monkeypatch.setattr(communicator_module, "DecisionRunner", lambda: runtime)
-    graph = communicator_module.builder.compile(checkpointer=InMemorySaver())
+    from langgraph.store.memory import InMemoryStore as NativeStore
+    store = NativeStore()
+    await store.aput(("coding", "projects"), "portal", {"project_id": "portal", "title": "Portal"})
+    runner = Mock()
+    monkeypatch.setattr(communicator_module, "DecisionRunner", lambda: runner)
+    follow = AsyncMock(side_effect=[
+        {"messages": [AIMessage(content="Ai sẽ dùng portal?", id="ai-1")]},
+        {"messages": [AIMessage(content="Đã ghi nhận khách hàng.", id="ai-2")]},
+    ])
+    monkeypatch.setattr(communicator_module, "follow_progress", follow)
+    graph = communicator_module.builder.compile(checkpointer=InMemorySaver(), store=store)
     config = {"configurable": {"thread_id": "conversation-1"}}
+    await graph.ainvoke({"messages": [("user", "Xin chào")]}, config)
+    selected = await graph.ainvoke({"messages": [("user", "1")]}, config)
+    assert selected["project_id"] == "portal"
+    follow.assert_not_awaited()
     await graph.ainvoke({"messages": [("user", "Tạo portal")]}, config)
-    # The chat client supplies visible assistant replies as next-turn input.
-    output = await graph.ainvoke({"messages": [AIMessage(content="Ai sẽ dùng portal?", id="ai-1"),
-                                               ("user", "Cho khách hàng")]}, config)
-    history = runtime.chat.call_args.args[0]
-    assert [message.content for message in history[1:]] == [
-        "Tạo portal", "Ai sẽ dùng portal?", "Cho khách hàng",
-    ]
-    assert len(output["messages"]) == 3
+    output = await graph.ainvoke({"messages": [("user", "Cho khách hàng")]}, config)
+    history = follow.call_args.args[2]
+    assert [message.content for message in history[-3:]] == [
+        "Tạo portal", "Ai sẽ dùng portal?", "Cho khách hàng"]
+    assert len(output["messages"]) == 8
+    assert output["project_id"] == "portal"
 
 
 async def test_communicator_requires_a_user_message_before_calling_llm(monkeypatch):

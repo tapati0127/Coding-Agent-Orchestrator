@@ -12,7 +12,8 @@ import re
 import time
 import uuid
 from pathlib import Path
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, messages_to_dict
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, messages_from_dict, messages_to_dict
+from langgraph.graph.message import add_messages
 
 from orchestrator.schemas.task import Task
 from orchestrator.schemas.task_graph import Agent, HumanRequest, Outcome, Status, TaskGraphOutput
@@ -163,8 +164,19 @@ class Dispatcher:
             message = payload.get("message", "").strip()
             if not message or len(message) > 50000:
                 raise ValueError("message must be 1..50000 characters")
+            history = payload.get("history", [])
+            if not isinstance(history, list) or len(history) > 1000 or len(json.dumps(history)) > 1000000:
+                raise ValueError("conversation history is too large or invalid")
+            history = messages_from_dict(history)
+            if any(not isinstance(item, (HumanMessage, AIMessage)) for item in history):
+                raise ValueError("submitted conversation history only permits human and assistant messages")
+            conversations = await self.store.search((*ns, "conversations"))
+            prior = max(conversations, key=lambda row: row.get("created_at", 0)) if conversations else {}
+            prior_messages = [item for item in messages_from_dict(prior.get("Messages", []))
+                              if isinstance(item, (HumanMessage, AIMessage))]
             chain_id = identifier(rid, "chain")
-            await self._conversation(put, pid, chain_id, HumanMessage(content=message, id=rid))
+            await self._conversation(put, pid, chain_id, HumanMessage(content=message, id=rid),
+                                     history=add_messages(prior_messages, history))
             graph = TaskGraphOutput(project_id=pid, source_task_id="human",
                 producer_agent=Agent.COMMUNICATOR, execution_chain_id=chain_id,
                 summary="New user request", nodes=[{"id": "communicate", "target_agent": "COMMUNICATOR",
@@ -485,10 +497,10 @@ class Dispatcher:
             "expires_at": self.clock() + self.human_response_timeout_seconds if graph.producer_agent == Agent.COMMUNICATOR else None,
             "created_at": self.clock()})
 
-    async def _conversation(self, put, pid, chain_id, message, *, timed_out=None):
+    async def _conversation(self, put, pid, chain_id, message, *, timed_out=None, history=()):
         ns = ("coding", pid, "conversations")
         record = await self.store.get(ns, chain_id) or {
-            "execution_chain_id": chain_id, "Messages": [], "created_at": self.clock()}
+            "execution_chain_id": chain_id, "Messages": messages_to_dict(list(history)), "created_at": self.clock()}
         record["Messages"].extend(messages_to_dict([message]))
         if timed_out is not None:
             record["human_response_timed_out"] = timed_out

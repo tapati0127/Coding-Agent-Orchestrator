@@ -131,6 +131,7 @@ def test_system_normalization_preserves_content_blocks_and_conversation_roles():
 
 async def test_chat_ainvoke_streams_tokens_from_subgraph_without_returning_messages(monkeypatch):
     from orchestrator.graphs import communicator
+    from langgraph.store.memory import InMemoryStore
 
     requests = []
 
@@ -153,15 +154,22 @@ async def test_chat_ainvoke_streams_tokens_from_subgraph_without_returning_messa
     monkeypatch.setattr(httpx, "AsyncClient", AsyncClient)
     runner = DecisionRunner(base_url="http://fixture.internal/v1", api_key="fixture-key", model="fixture")
     monkeypatch.setattr(communicator, "DecisionRunner", lambda: runner)
-    chunks = [item async for item in communicator.graph.astream(
-        {"messages": [("user", "Xin chào"), SystemMessage(content="Report the latest status")]},
+    async def follow(state, model, messages, writer, **kwargs):
+        reply = await model.chat(messages, stream=True)
+        writer({"type": "reply", "id": reply.id, "content": reply.content})
+        return {"messages": [reply]}
+    monkeypatch.setattr(communicator, "follow_progress", follow)
+    graph = communicator.builder.compile(store=InMemoryStore())
+    chunks = [item async for item in graph.astream(
+        {"project_id": "portal", "messages": [("user", "Xin chào"), SystemMessage(content="Report the latest status")]},
         stream_mode=["messages", "custom", "values"], subgraphs=True)]
     tokens = [(ns, data[0].content) for ns, mode, data in chunks if mode == "messages"]
     assert "".join(text for _, text in tokens) == "Xin chào"
     assert all(ns for ns, _ in tokens)
     final = [data for ns, mode, data in chunks if mode == "values" and not ns][-1]
-    assert len(final["messages"]) == 2 and isinstance(final["messages"][0], HumanMessage)
+    assert len(final["messages"]) == 3 and isinstance(final["messages"][0], HumanMessage)
     assert isinstance(final["messages"][1], SystemMessage)
+    assert isinstance(final["messages"][2], AIMessage)
     assert requests[0]["stream"] is True
     assert requests[0]["enable_thinking"] is False
     assert [message["role"] for message in requests[0]["messages"]] == ["system", "user"]

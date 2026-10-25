@@ -133,8 +133,8 @@ class Supervisor:
         from orchestrator.workers.main import run_worker
 
         settings = self.settings
-        if not settings.orchestrator_token or not settings.dashboard_token:
-            raise RuntimeError("Set distinct ORCHESTRATOR_TOKEN and DASHBOARD_TOKEN before startup")
+        if not settings.orchestrator_token:
+            raise RuntimeError("Set ORCHESTRATOR_TOKEN before startup")
         prepare_persistence(self.cwd, settings.data_root)
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_: self.stopped.set())

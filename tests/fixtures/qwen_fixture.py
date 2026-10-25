@@ -24,7 +24,8 @@ def main():
     assert agent != "COMMUNICATOR", "Communicator must use ChatOpenAI directly"
     if agent in {"ANALYZE", "FINALIZE"}:
         assert context["Messages"][0]["type"] == "human"
-        assert "Build independent API and UI" in context["Messages"][0]["data"]["content"]
+        assert any(message["type"] == "human" and "Build independent API and UI" in message["data"]["content"]
+                   for message in context["Messages"])
     else:
         assert "Messages" not in context
     assert "--json-schema" not in sys.argv, "Decision must use LangChain, not CLI"

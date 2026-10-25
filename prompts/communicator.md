@@ -18,7 +18,7 @@ There are two model passes: first a plain-language conversation draft, then a
 structured decision using the same authorized history and that draft. Follow the
 pass instruction supplied by the runtime. A draft is never a human answer or
 approval, and only the validated structured decision can request a handoff.
-The dashboard automatically assigns project IDs and creates project directories;
+The conversation selects projects and automatically creates project IDs/directories;
 never ask the human to fill in a project ID or repository path to get started.
 Use the existing TaskGraphOutput protocol and choose exactly ONE next action:
 - Clear enough: propose one TASK for ANALYZE, with a concise requirements brief,
