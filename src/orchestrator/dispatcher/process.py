@@ -44,7 +44,7 @@ class DispatcherLoop:
             except ValueError as exc:
                 reply = {"accepted": False, "reason": str(exc)}
             if event["deadline"] > time.time():
-                self.replies[event["request_id"]] = reply
+                await asyncio.to_thread(self.replies.__setitem__, event["request_id"], reply)
             return
         receipt = await self.engine.handle(event)
         if event.get("kind") == "result" and not receipt["accepted"]:
@@ -74,7 +74,7 @@ class DispatcherLoop:
                 tasks[task["task_id"]] = Task.model_validate(task)
                 try:
                     job = await build_job(self.engine.store, project, task, worker_id, self.engine.max_backward)
-                    self.inboxes[worker_id].put(job)
+                    await asyncio.to_thread(self.inboxes[worker_id].put, job)
                     log.info("Task dispatched: project=%s task=%s agent=%s worker=%s",
                              task["project_id"], task["task_id"], agent, worker_id)
                 except Exception as exc:
@@ -88,9 +88,11 @@ class DispatcherLoop:
         for project in await self.engine.store.search(("coding", "projects")):
             await self.engine.recover(project["project_id"])
 
-    async def run(self):
+    async def run(self, *, on_ready=None):
         await self.recover()
         await self.schedule()
+        if on_ready:
+            on_ready()
         recovered_at = time.monotonic()
         while True:
             try:

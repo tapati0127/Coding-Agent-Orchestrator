@@ -60,6 +60,20 @@ def runner(tmp_path, executable, **kwargs):
                       data_root=tmp_path / "data", **kwargs)
 
 
+def test_qwen_resolves_ca_paths_before_switching_worktree(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    certs = tmp_path / "certs"
+    certs.mkdir()
+    (certs / "ca.pem").write_text("fixture certificate path")
+    monkeypatch.setenv("SSL_CERT_FILE", "certs/ca.pem")
+    monkeypatch.setenv("SSL_CERT_DIR", "certs")
+    monkeypatch.setenv("NODE_EXTRA_CA_CERTS", "certs/ca.pem")
+    env = runner(tmp_path, "qwen")._child_env(tmp_path / "home")
+    assert env["SSL_CERT_FILE"] == str(certs / "ca.pem")
+    assert env["NODE_EXTRA_CA_CERTS"] == str(certs / "ca.pem")
+    assert env["SSL_CERT_DIR"] == str(certs)
+
+
 async def test_real_subprocess_two_passes_streams_redacts_and_isolates_env(tmp_path, monkeypatch):
     executable = fake_cli(tmp_path, '''import json, os, sys
 from pathlib import Path

@@ -1,4 +1,4 @@
-"""Python queues for workers; a small manager bridge for the external web process."""
+"""Python worker queues shared with the Agent Server's Dispatcher loop."""
 
 import asyncio
 from functools import lru_cache
@@ -11,11 +11,15 @@ from uuid import uuid4
 
 _events = None
 _replies = None
+_inboxes = None
+_roles = None
+_status = None
 
 
-def _initialize(events):
-    global _events, _replies
+def _initialize(events, inboxes, roles):
+    global _events, _replies, _inboxes, _roles, _status
     _events, _replies = events, {}
+    _inboxes, _roles, _status = inboxes, roles, {"state": "starting"}
 
 
 def _get_events():
@@ -26,17 +30,32 @@ def _get_replies():
     return _replies
 
 
+def _get_inbox(worker_id):
+    return _inboxes[worker_id]
+
+
+def _get_roles():
+    return _roles
+
+
+def _get_status():
+    return _status
+
+
 class QueueBridge(BaseManager):
     pass
 
 
 QueueBridge.register("events", callable=_get_events)
 QueueBridge.register("replies", callable=_get_replies, proxytype=DictProxy)
+QueueBridge.register("inbox", callable=_get_inbox)
+QueueBridge.register("roles", callable=_get_roles, proxytype=DictProxy)
+QueueBridge.register("status", callable=_get_status, proxytype=DictProxy)
 
 
-def start_bridge(events, context):
+def start_bridge(events, context, inboxes=None, roles=None):
     bridge = QueueBridge(address=("127.0.0.1", 0), authkey=os.urandom(32), ctx=context)
-    bridge.start(initializer=_initialize, initargs=(events,))
+    bridge.start(initializer=_initialize, initargs=(events, inboxes or {}, roles or {}))
     return bridge
 
 
@@ -75,9 +94,14 @@ class DispatcherClient:
         return await asyncio.to_thread(self._read, "search", namespace, limit=limit)
 
 
-@lru_cache(maxsize=1)
-def get_dispatcher():
+def connect_bridge():
     address = tuple(json.loads(os.environ["ORCHESTRATOR_IPC_ADDRESS"]))
     bridge = QueueBridge(address=address, authkey=bytes.fromhex(os.environ["ORCHESTRATOR_IPC_KEY"]))
     bridge.connect()
+    return bridge
+
+
+@lru_cache(maxsize=1)
+def get_dispatcher():
+    bridge = connect_bridge()
     return DispatcherClient(bridge)

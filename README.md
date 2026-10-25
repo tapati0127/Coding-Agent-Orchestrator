@@ -37,7 +37,7 @@ set +a
 uv run python -m orchestrator.supervisor
 ```
 
-Supervisor khởi động `langgraph dev --host 0.0.0.0 --port 2024 --no-browser --no-reload --n-jobs-per-worker 10`, chờ readiness, rồi chạy Dispatcher và từng worker. Dừng bằng SIGTERM/Ctrl-C để lưu trạng thái phát triển và kết thúc subprocess theo thứ tự.
+Supervisor khởi động `langgraph dev --host 0.0.0.0 --port 2024 --no-browser --no-reload --n-jobs-per-worker 10`. Dispatcher chạy trong lifespan của Agent Server với Store từ Runtime; sau readiness, Supervisor khởi động từng worker process. Dừng bằng SIGTERM/Ctrl-C để lưu trạng thái phát triển và kết thúc theo thứ tự.
 
 ```bash
 uv run pytest -q
@@ -77,8 +77,9 @@ cùng chain qua `human_reply` (câu hỏi chuyển `RESOLVED`, không tự đán
 duyệt). Dừng theo dõi hoặc đóng browser không hủy task nền.
 
 Supervisor tạo một queue kết quả chung và một queue nhận việc cho mỗi worker
-bằng `multiprocessing.Queue`, rồi khởi động Dispatcher và các worker bằng
-`multiprocessing.Process` (spawn).
+bằng `multiprocessing.Queue`, rồi khởi động các worker bằng
+`multiprocessing.Process` (spawn). Dispatcher là một async task trong lifespan
+của Agent Server, nhận `Runtime` và dùng chung `runtime.store` với Communicator.
 
 ```text
 Dispatcher đọc/ghi Store
@@ -99,14 +100,16 @@ phục hồi lease hết hạn và giao lại việc còn hợp lệ. Mã lượ
 giúp từ chối heartbeat/kết quả cũ của lượt đã hết lease. Giới hạn Qwen toàn hệ thống
 được Dispatcher kiểm tra khi cấp việc; Communicator không chiếm slot Qwen.
 
-Agent Server chỉ expose Communicator và phục vụ Dashboard. Do nó là process ngoài,
-Supervisor mở một `multiprocessing.Manager` bridge trên loopback để Dashboard gửi
-yêu cầu và nhận phản hồi từ Dispatcher. Dashboard cũng không mở Store client.
+Agent Server chỉ expose Communicator và phục vụ Dashboard. Supervisor mở một
+`multiprocessing.Manager` bridge trên loopback để Dispatcher trong Agent Server
+nhận kết quả và gửi việc qua các queue worker. Dashboard gửi yêu cầu tới cùng
+Dispatcher qua bridge; không mở Store client.
 Chạy qua Supervisor để có bridge; graph chat `messages` vẫn dùng được riêng.
 
-`SDKStore` chỉ dùng trong process Dispatcher riêng để truy cập cùng Store do
-Agent Server quản lý. Node Communicator dùng Store từ Runtime, không gọi vòng
-qua HTTP Store API.
+Dispatcher và Communicator đều dùng Store từ Runtime, không gọi HTTP Store API.
+`StoreRecords` chỉ chuyển native Store Items thành dictionary cho engine hiện
+có, không tạo client hay Store mới. Khi shutdown, Supervisor đợi worker flush
+kết quả, gửi sentinel dừng Dispatcher rồi mới dừng Agent Server và bridge.
 
 Chưa triển khai hủy task hoặc trạng thái `CANCEL`.
 
@@ -138,6 +141,21 @@ task (mặc định 3, tính cả lượt đầu); các đề xuất bị loại
 tốn backward budget. Nếu vẫn sai, lượt chạy báo lỗi để xử lý theo retry kỹ thuật.
 
 ## Cấu hình
+
+Với HTTPS bị `unable to get local issuer certificate`, kiểm tra server đã gửi
+đủ intermediate chain chưa. Có thể bổ sung intermediate đã xác minh cùng các CA
+gốc đang tin cậy vào `.local/certs/ca-bundle.pem`, rồi cấu hình cả hai runtime:
+
+```dotenv
+SSL_CERT_FILE=.local/certs/ca-bundle.pem
+NODE_EXTRA_CA_CERTS=.local/certs/ca-bundle.pem
+```
+
+HTTPX/ChatOpenAI đọc `SSL_CERT_FILE`; Qwen Code dùng `NODE_EXTRA_CA_CERTS`.
+QwenRunner đổi đường dẫn CA tương đối thành tuyệt đối trước khi chạy trong
+worktree khác. Compose mount `.local/certs` vào `/app/.local/certs` ở chế độ chỉ
+đọc. Bundle là cấu hình local, đã được gitignore; cần tạo file trên máy chạy.
+Khởi động lại Supervisor/container sau khi đổi biến CA.
 
 Thinking được tắt cho cả hai pass. ChatOpenAI gửi `enable_thinking=false` và
 `chat_template_kwargs.enable_thinking=false` qua `extra_body`. Qwen Code nhận
@@ -194,7 +212,7 @@ quyền truy cập GitLab còn phụ thuộc token được cấp.
 
 | Biến | Ý nghĩa |
 | --- | --- |
-| `ORCHESTRATOR_TOKEN` | Token Agent Server và Store client của Dispatcher; không phát cho browser |
+| `ORCHESTRATOR_TOKEN` | Token API nội bộ Agent Server và SDK chat proxy; không phát cho browser |
 | `DASHBOARD_TOKEN` | Token riêng cho API giao diện |
 | `QWEN_BASE_URL`, `QWEN_API_KEY`, `QWEN_MODEL` | Endpoint/model OpenAI-compatible cho Qwen Code |
 | `DECISION_BASE_URL`, `DECISION_API_KEY`, `DECISION_MODEL` | LLM nội bộ cho Decision; từng giá trị mặc định theo `QWEN_*` |

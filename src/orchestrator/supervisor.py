@@ -79,6 +79,7 @@ class Supervisor:
         self.stopped = threading.Event()
         self.children, self.specs, self.started, self.restarts = {}, {}, {}, {}
         self.inboxes, self.events, self.bridge, self.server = {}, None, None, None
+        self.dispatcher_status = None
         self.max_restarts = int(os.getenv("WORKER_MAX_RESTARTS", "3"))
         self.restart_window = float(os.getenv("WORKER_RESTART_WINDOW_SECONDS", "300"))
 
@@ -99,19 +100,20 @@ class Supervisor:
         process.join()
 
     def shutdown(self):
-        # Let workers finish, flush results to Dispatcher, then stop persistence.
+        # Flush worker results, stop the in-server Dispatcher, then persistence.
         for inbox in self.inboxes.values():
             inbox.put(None)
         deadline = time.monotonic() + 10
         for name, process in self.children.items():
-            if name != "dispatcher":
-                process.join(timeout=max(0, deadline - time.monotonic()))
-                self.stop_process(process)
-        dispatcher = self.children.get("dispatcher")
-        if dispatcher:
+            process.join(timeout=max(0, deadline - time.monotonic()))
+            self.stop_process(process)
+        if self.dispatcher_status is not None and self.dispatcher_status.get("state") == "running":
             self.events.put(None)
-            dispatcher.join(timeout=10)
-            self.stop_process(dispatcher)
+            deadline = time.monotonic() + 10
+            while self.dispatcher_status.get("state") == "running" and time.monotonic() < deadline:
+                if self.server and self.server.poll() is not None:
+                    break
+                time.sleep(0.05)
         self.children.clear()
         if self.server and self.server.poll() is None:
             self.server.terminate()
@@ -128,7 +130,6 @@ class Supervisor:
             queue.close()
 
     def run(self):
-        from orchestrator.dispatcher.main import run_dispatcher
         from orchestrator.workers.main import run_worker
 
         settings = self.settings
@@ -141,18 +142,20 @@ class Supervisor:
             roles = worker_specs(settings)
             self.events = self.context.Queue()
             self.inboxes = {worker_id: self.context.Queue() for worker_id in roles}
-            self.bridge = start_bridge(self.events, self.context)
+            self.bridge = start_bridge(self.events, self.context, self.inboxes, roles)
+            self.dispatcher_status = self.bridge.status()
             env = {**os.environ, "ORCHESTRATOR_IPC_ADDRESS": json.dumps(self.bridge.address),
                    "ORCHESTRATOR_IPC_KEY": bytes(self.bridge._authkey).hex()}
             self.server = subprocess.Popen(server_command(settings), cwd=self.cwd, env=env)
             if not wait_for_readiness(settings.langgraph_url, settings.orchestrator_token, self.stopped):
                 return 0 if self.stopped.is_set() else 1
-            self.spawn("dispatcher", run_dispatcher,
-                       (self.events, self.inboxes, roles, self.bridge.replies(), settings))
             for worker_id, agent in roles.items():
                 self.spawn(worker_id, run_worker, (agent, worker_id, self.inboxes[worker_id], self.events, settings))
             while not self.stopped.wait(0.25):
                 if self.server.poll() is not None:
+                    return 1
+                if self.dispatcher_status.get("state") in {"failed", "stopped"}:
+                    log.error("Dispatcher stopped; shutting down workers")
                     return 1
                 for name, process in list(self.children.items()):
                     if process.is_alive():

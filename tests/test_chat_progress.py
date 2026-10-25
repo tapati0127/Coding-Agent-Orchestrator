@@ -108,7 +108,7 @@ async def test_graph_injects_store_into_subgraph_without_opening_sdk_client(monk
     model = SimpleNamespace(chat=AsyncMock(return_value=AIMessage(content="Finished", id="reply")))
     monkeypatch.setattr(communicator, "DecisionRunner", lambda: model)
     monkeypatch.setattr(progress, "get_dispatcher", lambda: SimpleNamespace(submit=submit))
-    monkeypatch.setattr("orchestrator.store.SDKStore", Mock(side_effect=AssertionError("No Store SDK in graph")))
+    monkeypatch.setattr("langgraph_sdk.get_client", Mock(side_effect=AssertionError("No Store SDK in graph")))
     graph = communicator.builder.compile(store=store)
     events = [event async for event in graph.astream(
         {"project_id": "p", "messages": [HumanMessage(content="Build API", id="user-1")]},

@@ -12,6 +12,7 @@ services:
     volumes:
       - orchestrator-workspace:/workspace
       - orchestrator-data:/data
+      - ./.local/certs:/app/.local/certs:ro
     restart: unless-stopped
     stop_grace_period: 30s
 

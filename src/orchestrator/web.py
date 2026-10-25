@@ -1,6 +1,7 @@
 """Chat UI with an authenticated LangGraph SDK streaming proxy."""
 
 import asyncio
+from contextlib import asynccontextmanager
 import hmac
 import json
 import os
@@ -15,6 +16,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from orchestrator.queues import get_dispatcher
+from orchestrator.config import Settings
+from orchestrator.dispatcher.main import dispatcher_lifespan
+from langgraph.runtime import get_runtime
 from langgraph_sdk import get_client
 
 
@@ -43,7 +47,18 @@ async def authorize(request: Request) -> None:
 
 
 DispatcherData = Annotated[Any, Depends(get_dispatcher)]
-app = FastAPI(title="Qwen Orchestrator dashboard", docs_url=None, redoc_url=None)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    if "ORCHESTRATOR_IPC_ADDRESS" not in os.environ:
+        yield
+        return
+    async with dispatcher_lifespan(get_runtime(), Settings.from_env()):
+        yield
+
+
+app = FastAPI(title="Qwen Orchestrator dashboard", docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
 class StrictInput(BaseModel):

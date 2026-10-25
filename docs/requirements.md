@@ -7,7 +7,7 @@
 
 1. Hệ thống gồm **6 loại agent** đánh số **0–5**: Communicator, Analyze, Plan & Delegate, Execute, Verify & Integrate, Finalize.
 2. **Chỉ một container** chứa toàn bộ runtime: `langgraph dev`, Task Dispatcher, các agent worker, Qwen Code CLI, Git và giao diện quản lý cơ bản. **Không triển khai backend nghiệp vụ/API điều phối độc lập, PostgreSQL hoặc Redis riêng**.
-3. Task Dispatcher là **single-writer cho task chính thức**: nhận đề xuất từ agent, kiểm tra quyền/quy tắc/trạng thái/dependencies/giới hạn, sau đó ghi hoặc cập nhật task trong **LangGraph Store**. Nó là process Python nội bộ, không phải web backend.
+3. Task Dispatcher là **single-writer cho task chính thức**: nhận đề xuất từ agent, kiểm tra quyền/quy tắc/trạng thái/dependencies/giới hạn, sau đó ghi hoặc cập nhật task trong **LangGraph Store**. Nó là async task trong lifespan của Agent Server, nhận Store từ LangGraph Runtime, không mở SDK Store client.
 4. Mỗi loại agent có **worker process độc lập**; riêng Execute có **tối đa 5 worker**. Supervisor dùng multiprocessing.Process và Queue. Dispatcher claim task, dựng context rồi gửi snapshot vào queue worker. Worker chờ queue.get(), invoke graph ngay trong process của mình và gửi kết quả qua queue chung; không đọc Store và không gọi LangGraph SDK.
 5. **Agents không nối bằng một LangGraph edge cố định.** Các graph có thể tạo đề xuất giao việc cho nhau; Dispatcher kiểm tra và mở task thích hợp trong Store.
 6. **Mọi lượt xử lý task dùng đúng một định dạng structured output chung: `TaskGraphOutput`**. Năm agent kỹ thuật sử dụng Qwen Code. Communicator đọc trực tiếp `messages` và gọi ChatOpenAI với prompt riêng hướng người dùng; không chạy Qwen Code. Chat trực tiếp không cần task/cwd và trả `AIMessage`.
@@ -41,7 +41,7 @@
 1. **Pass 1 — Work:** chạy Qwen Code để thực hiện nhiệm vụ chuyên biệt. Plan tạo kế hoạch **bằng ngôn ngữ tự nhiên**; Execute viết/chạy code; Verify thực hiện review/kiểm tra; v.v. Ghi log, kết quả và references đến artifacts.
 2. **Pass 2 — Graph decision:** gọi LangChain `ChatOpenAI.ainvoke()` bất đồng bộ, tắt streaming (`streaming=False`, `disable_streaming=True`, tag `nostream`), để đọc kết quả Pass 1 và sinh **chỉ một `TaskGraphOutput` hợp lệ theo JSON Schema chung**; kể cả không có task mới, vẫn trả graph rỗng cùng outcome và source-task result.
 3. Worker gửi output vào multiprocessing.Queue chung. Dispatcher kiểm tra protocol, quyền, dependencies, transitions, backward budget và idempotency rồi mới ghi graph/task chính thức.
-4. Dispatcher là process ứng dụng duy nhất ghi Store. Worker nhận context qua queue; Communicator chat đọc trạng thái task/approval qua `runtime.store` do LangGraph inject (`aget/asearch`), không tạo SDK Store client và không tự cập nhật task. SDK Store adapter chỉ dùng ở process Dispatcher riêng.
+4. Chỉ Dispatcher ghi Store. Dispatcher và Communicator dùng cùng `runtime.store` do LangGraph cấp, không tạo SDK Store client. Worker nhận context qua queue; Communicator chat đọc trạng thái task/approval bằng `aget/asearch` và không tự cập nhật task.
 
 Dispatcher cấp task cho worker đang rảnh sau khi kiểm tra readiness và capacity.
 Graph xử lý một lượt rồi kết thúc; worker tiếp tục queue.get() đến sentinel shutdown.
@@ -242,7 +242,7 @@ Mỗi task chính thức tối thiểu chứa:
 6. Worker invoke graph local, gửi heartbeat/progress metadata và output graph qua queue chung khi hoàn thành.
 7. Reconcile task `DOING` bị orphan, Qwen subprocess bị chết, run thất bại, worktree còn dang dở; cleanup an toàn sau khi giữ artifacts.
 
-**Nguyên tắc single-writer:** worker chỉ gửi message qua queue; chỉ Dispatcher ghi dữ liệu chính thức, Communicator chat chỉ đọc trạng thái từ Store. `request_id` và task IDs do Dispatcher cấp/derive phải idempotent. Store `put/get/search` không được coi là transaction nhiều bản ghi/atomic CAS; Dispatcher phải có nhật ký thao tác có thể replay/reconcile, ghi receipt chỉ sau khi task/graph authoritative đã được áp dụng. Một Dispatcher process duy nhất ngăn tranh chấp claim trong MVP; không tự nhận đạt bảo đảm exactly-once trên mọi crash.
+**Nguyên tắc single-writer:** worker chỉ gửi message qua queue; chỉ Dispatcher ghi dữ liệu chính thức, Communicator chat chỉ đọc trạng thái từ Store. `request_id` và task IDs do Dispatcher cấp/derive phải idempotent. Store `put/get/search` không được coi là transaction nhiều bản ghi/atomic CAS; Dispatcher phải có nhật ký thao tác có thể replay/reconcile, ghi receipt chỉ sau khi task/graph authoritative đã được áp dụng. Một Dispatcher loop duy nhất với file lock ngăn tranh chấp claim trong MVP; không tự nhận đạt bảo đảm exactly-once trên mọi crash.
 
 **Scheduling:** tối đa 5 phiên Qwen Code chạy **trên toàn hệ thống** tại một thời điểm. Số worker Execute cấu hình 1–5; Analyze/Plan/Verify/Finalize cũng sử dụng các slot Qwen này khi hoạt động. Communicator gọi ChatOpenAI trực tiếp và không chiếm slot Qwen. Giới hạn concurrency của `langgraph dev` phải đủ để không khiến các graph run bị tuần tự ngoài ý muốn. Dùng `asyncio.create_subprocess_exec` (hoặc tương đương) để không block event loop của server.
 
@@ -349,7 +349,7 @@ multi-agent-qwen-orchestrator/
 └── dashboard/
 ```
 
-`langgraph.json` chỉ expose graph `communicator`; graph kỹ thuật chạy local trong worker process với context do Dispatcher cấp. Agent workers, Dispatcher và Supervisor là Python processes/threads nội bộ cùng container. Không cần `PostgreSQL URL`, Redis hay một task-queue service bên ngoài trong MVP.
+`langgraph.json` chỉ expose graph `communicator`; graph kỹ thuật chạy local trong worker process với context do Dispatcher cấp. Dispatcher chạy trong lifespan của Agent Server, dùng `runtime.store` và queue proxy qua manager bridge. Supervisor và agent workers là các process cùng container. Không cần `PostgreSQL URL`, Redis hay một task-queue service bên ngoài trong MVP.
 
 ## 12. Điều kiện nghiệm thu MVP
 

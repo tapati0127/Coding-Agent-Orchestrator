@@ -25,6 +25,14 @@ def identifier(request_id, suffix):
     return uuid.uuid5(uuid.NAMESPACE_URL, f"qwen-orchestrator:{request_id}:{suffix}").hex
 
 
+def _repository_path(path):
+    root = Path(os.getenv("WORKSPACE_ROOT", "/workspace")).resolve()
+    path = Path(path).resolve()
+    if not path.is_relative_to(root) or not (path / ".git").exists():
+        raise ValueError("repository must be an existing Git checkout below WORKSPACE_ROOT")
+    return str(path)
+
+
 class Dispatcher:
     def __init__(self, store, *, max_qwen_sessions=5, max_execute_workers=5,
                  max_backward=3, max_attempts=3, lease_seconds=600,
@@ -130,11 +138,7 @@ class Dispatcher:
                 raise ValueError("project already exists")
             path = payload.get("repository_path")
             if path:
-                root = Path(os.getenv("WORKSPACE_ROOT", "/workspace")).resolve()
-                path = Path(path).resolve()
-                if not path.is_relative_to(root) or not (path / ".git").exists():
-                    raise ValueError("repository must be an existing Git checkout below WORKSPACE_ROOT")
-                path = str(path)
+                path = await asyncio.to_thread(_repository_path, path)
             put(("coding", "projects"), pid, {"project_id": pid,
                 "title": str(payload.get("title", pid))[:500], "repository_path": path,
                 "created_at": self.clock()})
@@ -374,7 +378,7 @@ class Dispatcher:
                 put((*ns, "notifications"), rid, {"message": graph.summary or "Execution chain complete",
                     "execution_chain_id": graph.execution_chain_id, "timestamp": self.clock()})
             put((*ns, "tasks"), source.task_id, source.model_dump(mode="json"))
-            self._publish_artifacts(put, ns, source, result.artifact_refs)
+            await asyncio.to_thread(self._publish_artifacts, put, ns, source, result.artifact_refs)
         put((*ns, "chains"), graph.execution_chain_id, chain)
         created = []
         if not overflow:

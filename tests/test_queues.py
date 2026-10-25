@@ -149,7 +149,7 @@ async def test_user_request_through_communicator_and_technical_worker_without_st
 
     monkeypatch.setattr(QwenRunner, "_invoke", work)
     monkeypatch.setattr(DecisionRunner, "ainvoke", decide)
-    monkeypatch.setattr("orchestrator.store.SDKStore", Mock(side_effect=AssertionError("Agents must not open Store")))
+    monkeypatch.setattr("langgraph_sdk.get_client", Mock(side_effect=AssertionError("Agents must not open SDK clients")))
     await loop.handle({"request_id": uuid4().hex, "project_id": "p1", "agent": "COMMUNICATOR",
                        "kind": "human_message", "payload": {"message": "PRIVATE_USER_REQUIREMENT"}})
     await loop.schedule()

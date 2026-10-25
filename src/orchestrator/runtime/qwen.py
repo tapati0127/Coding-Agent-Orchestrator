@@ -120,6 +120,11 @@ class QwenRunner:
             }},
         }), encoding="utf-8")
         env = {key: value for key, value in os.environ.items() if key in _ENV_ALLOWLIST}
+        # Qwen runs in a different worktree. Resolve CA paths before changing
+        # its working directory so relative .env paths still find the bundle.
+        for key in ("SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"):
+            if env.get(key):
+                env[key] = str(Path(env[key]).expanduser().resolve())
         env.update({
             "HOME": str(state_dir), "USERPROFILE": str(state_dir),
             "OPENAI_API_KEY": self.api_key, "OPENAI_BASE_URL": self.base_url,
