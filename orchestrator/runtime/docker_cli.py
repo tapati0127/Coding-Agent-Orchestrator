@@ -12,13 +12,22 @@ FORWARDED_ENV = (
 )
 
 
-def run_in_docker(command, *, docker, workdir, project, env, timeout):
+def run_in_docker(command, *, docker, workdir, project, env, timeout, log_info=None, stream_format=None):
     cidfile = workdir / 'container.cid'
     docker_command = [docker, 'run', '--rm', '--init', '--network', 'host',
         '--cidfile', str(cidfile), '--workdir', str(workdir),
         '--mount', f'type=bind,src={workdir},dst={workdir}',
         '--mount', f'type=bind,src={project},dst={project}']
     mounted = {str(workdir), str(project)}
+    if (project / '.git').is_file():
+        metadata = subprocess.run(['git', '-C', str(project), 'rev-parse',
+            '--path-format=absolute', '--git-common-dir'], capture_output=True,
+            text=True, timeout=10, check=True)
+        common = Path(metadata.stdout.strip()).resolve(strict=True)
+        if str(common) not in mounted:
+            docker_command += ['--mount', f'type=bind,src={common},dst={common}']
+            mounted.add(str(common))
+
     for key in ('SSL_CERT_FILE', 'NODE_EXTRA_CA_CERTS'):
         value = env.get(key)
         if value:
@@ -35,7 +44,7 @@ def run_in_docker(command, *, docker, workdir, project, env, timeout):
     try:
         return run_logged(docker_command, env=env, stdin=subprocess.DEVNULL,
             capture_output=True, text=True, encoding='utf-8', errors='replace',
-            timeout=timeout, check=False)
+            timeout=timeout, check=False, log_info=log_info, stream_format=stream_format)
     finally:
         # Killing docker run on timeout alone does not reliably stop the container.
         if cidfile.exists():

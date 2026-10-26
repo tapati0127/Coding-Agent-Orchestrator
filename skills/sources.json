@@ -1,0 +1,35 @@
+[
+  {
+    "name": "systematic-debugging",
+    "repository": "https://github.com/obra/superpowers",
+    "commit": "2ce8aa15d05bd57213e6f746f953aafb7ded7a8b",
+    "upstream_path": "skills/systematic-debugging",
+    "upstream_skill_sha256": "51c6435d98c83c42c96ba7c35725a0b2c376cd487fb1a4e6bd0ddbe7e33ef202",
+    "local_path": "skills/vendor/superpowers/systematic-debugging",
+    "adapted": true,
+    "adaptation": "Removed unavailable TDD dependency; use native verification skill; report blockers to Plan and keep runtime Git ownership.",
+    "local_skill_sha256": "2819c191a878aace9f5189efe814b6e889d4da5f0155ace2af15f9ded028bb7b"
+  },
+  {
+    "name": "verification-before-completion",
+    "repository": "https://github.com/obra/superpowers",
+    "commit": "2ce8aa15d05bd57213e6f746f953aafb7ded7a8b",
+    "upstream_path": "skills/verification-before-completion",
+    "upstream_skill_sha256": "2befe7fc55bcadaa3d97dd9e8efeb633d2561c0ebe74c5a8b17c4d9e7e4520b3",
+    "local_path": "skills/vendor/superpowers/verification-before-completion",
+    "adapted": true,
+    "adaptation": "Added task scope, read-only review and runtime-owned Git/dispatch constraints.",
+    "local_skill_sha256": "7cbfeddd898bc785a007fa40b97d2539b63fdbde4cd3a7b6aac2da1b6af32103"
+  },
+  {
+    "name": "ponytail",
+    "repository": "https://github.com/DietrichGebert/ponytail",
+    "commit": "09c434ab73ca43761c5d8b0c5d341926c2fba710",
+    "upstream_path": "skills/ponytail",
+    "upstream_skill_sha256": "9badd22a32e19cb884e46dfa8d3aae82bb81dfa5484105b8b4f0262df823a509",
+    "local_path": "skills/vendor/ponytail/ponytail",
+    "adapted": true,
+    "adaptation": "Scoped full mode to an Execute invocation and removed unsupported argument-hint metadata.",
+    "local_skill_sha256": "304dbd0f30f6475b50ab7987d8ffba6bd730ba28ac890947da91e6445a66ccf5"
+  }
+]

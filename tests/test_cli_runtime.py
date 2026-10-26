@@ -25,7 +25,10 @@ class CliRuntimeTests(unittest.TestCase):
                     self.assertIn('Original task', command[-1])
                     if cli == 'qwen':
                         self.assertIn('--yolo', command)
+                        self.assertIn('--include-partial-messages', command)
+                        self.assertEqual(command[command.index('--output-format') + 1], 'stream-json')
                     else:
+                        self.assertEqual(command[command.index('--format') + 1], 'json')
                         config = json.loads(kwargs['env']['OPENCODE_CONFIG_CONTENT'])
                         self.assertEqual(config['permission'], 'allow')
                         self.assertEqual(json.loads(kwargs['env']['OPENCODE_PERMISSION']), {'*': 'allow'})

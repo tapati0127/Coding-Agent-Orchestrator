@@ -7,14 +7,18 @@ import shutil
 import subprocess
 
 from .cli_logs import run_logged
+from .cli_events import report_text
 from typing import Literal
 from urllib.parse import urlsplit
 
 from .workdir import coding_workdir
 from .docker_cli import run_in_docker
 from .thinking import thinking_body
+from .cli_skills import configured_skills, stage_skills
+from .logging import log_cli, event
 
 
+@log_cli
 def run_llm_cli(
     prompt: str,
     cli: Literal["opencode", "qwen"] = "qwen",
@@ -26,8 +30,11 @@ def run_llm_cli(
     timeout: float = 1800,
     thinking: bool | None = None,
     thinking_format: str | None = None,
+    role: Literal['plan', 'execute', 'reviewer'] | None = None,
+    task_title: str | None = None,
+    task_id: str | None = None,
 ) -> str:
-    """Return CLI stdout; raise on missing config, executable, failure or timeout.
+    """Return the assistant report; raise on missing config, failure or timeout.
 
     Configuration defaults to QWEN_BASE_URL, QWEN_MODEL and QWEN_API_KEY.
     Load .env in the caller if needed (e.g. python-dotenv's load_dotenv()).
@@ -35,6 +42,7 @@ def run_llm_cli(
     authentication, pass api_key="local". Tool approvals are always automatic.
     Each invocation gets a disposable cwd with project/ pointing to the real
     workspace. Only scratch files are cleaned; project edits persist.
+    Native events stream into the monitor; task_title/task_id label that session.
     """
     if cli not in {"opencode", "qwen"}:
         raise ValueError("cli must be 'opencode' or 'qwen'")
@@ -60,6 +68,7 @@ def run_llm_cli(
     if executable is None:
         raise FileNotFoundError(f"{cli} CLI is not installed or is missing from PATH")
 
+    skills = configured_skills(cli, role=role)
     request_thinking = thinking_body(thinking=thinking, thinking_format=thinking_format)
     env = os.environ.copy()
     # Keep credentials out of argv, logs, and persistent configuration files.
@@ -71,7 +80,7 @@ def run_llm_cli(
             OPENAI_API_KEY=api_key or "local",
         )
         command = [executable, "--auth-type", "openai", "--model", model,
-                   "--yolo", "--output-format", "text", "-p", prompt]
+                   "--yolo", "--output-format", "stream-json", "--include-partial-messages", "-p", prompt]
     else:
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps({
             "$schema": "https://opencode.ai/config.json",
@@ -90,18 +99,26 @@ def run_llm_cli(
             },
         })
         env["OPENCODE_PERMISSION"] = json.dumps({"*": "allow"})
-        command = [executable, "run", "--model", f"internal/{model}", "--", prompt]
+        command = [executable, "run", "--format", "json", "--model", f"internal/{model}", "--", prompt]
+
+    log_info = {'title': task_title or {'plan': 'Khảo sát và lập kế hoạch',
+                'execute': 'Triển khai nhiệm vụ', 'reviewer': 'Kiểm tra nhiệm vụ'}.get(role, 'Phiên CLI'),
+                'role': (role or cli).capitalize(), 'task_id': task_id or ''}
 
     with coding_workdir(cwd, cli=cli) as (workdir, project):
+        stage_skills(cli, workdir, skills)
+        event('cli.prepared', cli=cli, role=role, skill_count=len(skills),
+              skills=','.join(skill.name for skill in skills), workdir=workdir, project=project)
         if cli == 'qwen':
             settings_dir = workdir / '.qwen'
-            settings_dir.mkdir()
+            settings_dir.mkdir(exist_ok=True)
             (settings_dir / 'settings.json').write_text(json.dumps({
                 'model': {'generationConfig': {'extra_body': request_thinking}},
             }), encoding='utf-8')
         invocation_prompt = (
             f"Thư mục chạy riêng: {workdir}. Repository thật: {project}.\n"
-            "project/ là liên kết tới repository; đọc/sửa code ở repository thật, "
+            "project/ là liên kết tới checkout được giao; chỉ thao tác trong quyền "
+            "của vai trò nêu dưới đây, "
             "đọc hướng dẫn repository trước khi làm việc. Với lệnh test/build/git, "
             "đặt working directory vào project/. "
             "Dùng tmp/ cho file tạm. Thư mục chạy riêng sẽ được dọn khi CLI kết thúc; "
@@ -115,7 +132,7 @@ def run_llm_cli(
         env["AGENT_PROJECT_DIR"] = str(project)
         if runtime == 'docker':
             result = run_in_docker(command, docker=docker, workdir=workdir, project=project,
-                                   env=env, timeout=timeout)
+                                   env=env, timeout=timeout, log_info=log_info, stream_format=cli)
         else:
             result = run_logged(
                 command,
@@ -127,11 +144,19 @@ def run_llm_cli(
                 encoding="utf-8",
                 errors="replace",
                 timeout=timeout,
+                log_info=log_info,
+                stream_format=cli,
                 check=False,
             )
+    event('cli.process_exit', cli=cli, returncode=result.returncode,
+          stdout_chars=len(result.stdout or ''), stderr_chars=len(result.stderr or ''))
     if result.returncode:
         detail = (result.stderr or result.stdout).strip()
         if api_key:
             detail = detail.replace(api_key, "[REDACTED]")
         raise RuntimeError(f"{cli} exited with code {result.returncode}: {detail}")
-    return result.stdout.strip()
+    try:
+        return report_text(result.stdout, cli)
+    except RuntimeError as exc:
+        detail = str(exc).replace(api_key, '[REDACTED]') if api_key else str(exc)
+        raise RuntimeError(f'{cli}: {detail}') from None

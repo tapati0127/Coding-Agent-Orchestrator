@@ -24,6 +24,11 @@ def plan(ids=('a',), edges=()):
 
 class PlanAgentTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        from tests.response_helpers import install_response_model
+        install_response_model(self)
+        isolation = patch.dict('os.environ', {'GIT_TASK_ISOLATION': 'false'})
+        isolation.start()
+        self.addCleanup(isolation.stop)
         initializer = patch('graph.build_initialize_agent')
         factory = initializer.start()
         self.addCleanup(initializer.stop)
@@ -58,13 +63,16 @@ class PlanAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['natural_plan'], natural)
         self.assertEqual(set(result['plan']), {'nodes', 'edges'})
         self.assertIn('${api}', cli.call_args.args[0])
+        self.assertEqual(cli.call_args.kwargs['task_title'], 'Implement ${api}')
+        self.assertEqual(execute.call_args_list[0].kwargs['task_title'], 'Implement a')
+        self.assertEqual(execute.call_args_list[0].kwargs['task_id'], 'a')
         chat.return_value.with_structured_output.assert_called_once_with(PlanGraph, method='json_schema')
         payload = chat.return_value.with_structured_output.return_value.ainvoke.call_args.args[0][1].content
         self.assertEqual(json.loads(payload)['natural_plan'], natural)
         self.assertIn('API implemented', execute.call_args_list[1].args[0])
         self.assertIn('verified findings', execute.call_args_list[0].args[0])
         from orchestrator.runtime.artifacts import ARTIFACT_KEY
-        artifacts = [m for m in result['messages'] if m.additional_kwargs.get(ARTIFACT_KEY, {}).get('type') == 'execution_plan']
+        artifacts = [m for m in result['messages'] if any(a.get('type') == 'execution_plan' for a in m.additional_kwargs.get('orchestrator_artifacts', []))]
         self.assertEqual(len(artifacts), 1)
         self.assertNotIn('orchestrator_artifact', cli.call_args.args[0])
         self.assertNotIn('Bàn giao cho AI Plan', cli.call_args.args[0])
@@ -268,6 +276,23 @@ class PlanAgentTests(unittest.IsolatedAsyncioTestCase):
         for invalid in cases:
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 validate_plan_graph(invalid)
+
+    async def test_empty_structured_plan_is_stop_signal_and_never_executes(self):
+        empty = PlanGraph(nodes=[], edges=[])
+        with self.assertRaisesRegex(ValueError, 'no executable tasks'):
+            validate_plan_graph(empty)
+        with tempfile.TemporaryDirectory() as workspace, \
+             patch('orchestrator.agents.plan.run_llm_cli', return_value='Blocked: required API contract is unavailable'), \
+             patch('orchestrator.agents.plan.ChatOpenAI') as chat, \
+             patch('orchestrator.agents.execute.run_llm_cli') as execute:
+            chat.return_value.with_structured_output.return_value.ainvoke = AsyncMock(return_value=empty)
+            result = await build_graph(base_url='http://internal/v1', model='coder').ainvoke(
+                {'workspace':workspace, 'messages':[('user','Implement unavailable API contract')]})
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['plan'], {})
+        execute.assert_not_called()
+        self.assertFalse(any(m.additional_kwargs.get('orchestrator_artifact', {}).get('type') == 'execution_plan'
+                             for m in result['messages']))
 
 
 if __name__ == '__main__':

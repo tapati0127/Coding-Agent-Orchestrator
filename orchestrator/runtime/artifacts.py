@@ -8,12 +8,50 @@ ARTIFACT_KEY = 'orchestrator_artifact'
 ARTIFACT_TYPE = 'execution_plan'
 
 
+ARTIFACTS_KEY = 'orchestrator_artifacts'
+TEXT_KEY = 'orchestrator_text'
+RESPONSE_KEY = 'orchestrator_response'
+
+
+def is_artifact_only(message):
+    return (isinstance(message, AIMessage)
+            and isinstance(message.additional_kwargs.get(ARTIFACT_KEY), dict))
+
+
+def attach_artifacts(message, artifacts):
+    """Append deterministic markdown after generation, retaining an exact clean text copy."""
+    if not artifacts:
+        return message
+    metadata = dict(message.additional_kwargs)
+    plain = metadata.get(TEXT_KEY, message.content)
+    existing = list(metadata.get(ARTIFACTS_KEY, []))
+    for artifact in artifacts:
+        existing.append({**artifact.additional_kwargs[ARTIFACT_KEY], 'content': artifact.content})
+    metadata[TEXT_KEY] = plain
+    metadata[ARTIFACTS_KEY] = existing
+    content = str(plain) + '\n\n' + '\n\n'.join(str(item['content']) for item in existing)
+    return message.model_copy(update={'content': content, 'additional_kwargs': metadata})
+
+
 def preprocess_messages(messages):
-    """Return a filtered copy; retain display artifacts in the persisted state."""
-    def is_plan_artifact(message):
-        metadata = message.additional_kwargs.get(ARTIFACT_KEY) if isinstance(message, AIMessage) else None
-        return isinstance(metadata, dict) and metadata.get('type') in {ARTIFACT_TYPE, 'plan_handoff'}
-    return [message for message in messages if not is_plan_artifact(message)]
+    """Remove every owned artifact type; preserve the prose of mixed messages."""
+    clean = []
+    for message in messages:
+        if is_artifact_only(message):
+            continue
+        if isinstance(message, AIMessage):
+            metadata = dict(message.additional_kwargs)
+            content = message.content
+            if ARTIFACTS_KEY in metadata:
+                # Fail closed if a foreign/malformed mixed message has no clean prose.
+                content = metadata.pop(TEXT_KEY, '')
+                metadata.pop(ARTIFACTS_KEY, None)
+            metadata.pop(RESPONSE_KEY, None)
+            if not content:
+                continue
+            message = message.model_copy(update={'content': content, 'additional_kwargs': metadata})
+        clean.append(message)
+    return clean
 
 
 def plan_artifact(plan: PlanGraph, *, attempt=1):
@@ -22,7 +60,7 @@ def plan_artifact(plan: PlanGraph, *, attempt=1):
     ids = {node.id: f'task_{i}' for i, node in enumerate(plan.nodes)}
     lines = [f'### Kế hoạch thực thi · lần {attempt}', '',
              'Các nhánh độc lập có thể chạy song song. Nhiệm vụ chỉ bắt đầu khi tất cả phụ thuộc được duyệt.',
-             'Mỗi nhiệm vụ chạy Execute → Reviewer; nhánh phụ thuộc sẽ dừng nếu nhiệm vụ trước không đạt.',
+             'Mỗi nhiệm vụ chạy Execute → Reviewer; khi bật Git isolation, nhiệm vụ chỉ hoàn tất sau merge local. Nhánh phụ thuộc dừng nếu nhiệm vụ trước không đạt.',
              '', '```mermaid', 'flowchart TD', '    start([Bắt đầu])', '    finish([Kết thúc])']
     for node in plan.nodes:
         title = ' '.join(node.instructions.split())

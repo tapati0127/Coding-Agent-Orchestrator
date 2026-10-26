@@ -13,6 +13,7 @@ class PhaseState(TypedDict, total=False):
     cli_error: str
     status: str
     error: str
+    response_error: str
 
 
 class TaskState(PhaseState, total=False):

@@ -65,15 +65,18 @@ Reviewer fail được đưa về Plan như Execute fail, gồm đầy đủ not
 
 ## Replan và phần việc đã duyệt
 
-Các nhánh độc lập hoàn tất trước khi replan. Workspace giữ cả thay đổi thành
-công và thay đổi dở dang. Prompt yêu cầu kiểm tra hiện trạng, không reset/xóa
+Các nhánh độc lập hoàn tất trước khi replan. Khi bật Git isolation, workspace chính chỉ chứa thay đổi đã merge; task lỗi giữ
+code ở nhánh/worktree riêng trong metadata integration. Khi tắt isolation,
+workspace giữ cả thay đổi thành công và thay đổi dở dang. Prompt yêu cầu kiểm tra hiện trạng, không reset/xóa
 thay đổi và chỉ lập việc còn thiếu. Cả hai bước của Plan đều nhận approved_work.
 Task có cùng instructions, related_files, acceptance_criteria, constraints được
-runtime tái sử dụng kể cả đổi ID (`reused: true`). Trùng ý nghĩa nhưng đổi cách
+runtime tái sử dụng kể cả đổi ID (`reused: true`). Khi bật Git isolation, chỉ tái
+sử dụng nếu integration.status=merged và merged_commit còn thuộc lịch sử nhánh đích. Trùng ý nghĩa nhưng đổi cách
 diễn đạt chỉ được xử lý bằng prompt, chưa có semantic deduplication. Approval
 không tự vô hiệu hóa nếu các task sau thay đổi code đã duyệt.
 
-Mọi task dùng chung workspace; Plan phải nối phụ thuộc giữa task sửa chồng file.
+Mỗi task dùng worktree riêng mặc định; Plan vẫn phải nối phụ thuộc giữa task
+sửa chồng file hoặc phụ thuộc interface để tránh conflict khi tích hợp.
 Read-only của Plan/Reviewer là prompt instruction, chưa cưỡng chế bằng OS sandbox.
 Coding CLI luôn tự chấp thuận: Qwen --yolo và OpenCode permission=allow. Caller cancellation vẫn
 được truyền lên. Dùng ainvoke/astream cho root do DAG Execute/Reviewer là async;
@@ -103,8 +106,9 @@ Mọi lần tạo nội dung tự nhiên (Initialize/Plan/Execute/Reviewer) thê
 mới, name tương ứng role. Reducer add_messages giữ lịch sử; graph động gom các
 message mới của Execute/Reviewer về root, không nhân bản lịch sử hay approval
 được tái sử dụng. Bước structured cập nhật field nghiệp vụ; riêng Plan trả thêm
-AIMessage artifact sau khi DAG được validate. Artifact dựng bằng code, không
-phát sinh thêm lượt gọi LLM.
+AIMessage lời tóm tắt kèm artifact sau khi DAG được validate. Payload artifact
+dựng bằng code; phần lời qua model phản hồi như mô tả bên dưới. Initialize phát
+thêm phản hồi giải thích nếu bước readiness thất bại.
 Tất cả node và model invocation structured có tag no_stream; ChatOpenAI của
 bước này dùng streaming=False, disable_streaming=True. Khi dùng stream_mode
 messages, UI lọc event metadata tags chứa no_stream vì đây là tag dành cho UI,
@@ -133,7 +137,7 @@ báo cáo CLI vẫn là message riêng. Initialize giữ hai bước hội tho�
 Root chạy `initialize → announce_plan → plan → announce_execution →
 execute_network → summarize_execution`. Nếu cần hỏi làm rõ thì dừng ngay sau Initialize.
 Summary nêu số task được duyệt, task fail/skipped và có replan tiếp hay không;
-không gọi thêm LLM, không có timer. prepare_replan cũng trả thông báo trước khi
+các số liệu được tính tất định, còn lời diễn đạt qua bước user_response; không có timer. prepare_replan cũng trả thông báo trước khi
 quay qua announce_plan rồi vào Plan. ID team-progress dùng chung cho summary toàn team; từng role/task
 có ID progress:<role>:<task_id>. Reducer thay nội dung message cũ theo ID.
 
@@ -147,14 +151,16 @@ Xem ví dụ: `python -m examples.stream_progress 'Thêm API health và test'`.
 
 Mỗi lần gọi run_llm_cli tạo TemporaryDirectory riêng, kể cả khi các task chạy
 đồng thời hoặc Plan lập lại. Process cwd là thư mục đó, có project/ liên kết tới
-workspace thật và tmp/ cho file tạm. Prompt truyền rõ đường dẫn repository và
+checkout được giao và tmp/ cho file tạm. Với DAG isolation, checkout của Executor
+là nhánh task riêng, checkout Reviewer là bản merge thử trên nhánh chính mới nhất. Prompt truyền rõ đường dẫn repository và
 hướng dẫn chạy test/build/git trong project/. TMPDIR, AGENT_WORKDIR và
 AGENT_PROJECT_DIR được truyền riêng vào subprocess, không đổi môi trường cha.
 
-Workdir tự dọn khi CLI thành công, lỗi hoặc timeout. Thay đổi code trong project/
-được giữ để Reviewer và task phụ thuộc sử dụng. Đây là scratch directory riêng,
-không phải bản sao repository/git worktree; các task sửa chung file vẫn phải có
-edges phụ thuộc. Cleanup không xóa lịch sử/cache CLI lưu bên ngoài workdir.
+Scratch workdir tự dọn khi CLI thành công, lỗi hoặc timeout. Thay đổi code trong
+project/ được giữ trong checkout của task; runtime chuyển kết quả qua commit/merge
+để Reviewer và task phụ thuộc sử dụng. Đây là scratch directory riêng,
+không thay thế Git worktree theo task; các task sửa chồng file vẫn phải có
+edges phụ thuộc. Tắt GIT_TASK_ISOLATION sẽ quay lại sửa chung workspace. Cleanup không xóa lịch sử/cache CLI lưu bên ngoài workdir.
 Có thể đặt AGENT_WORKDIR_ROOT để chọn thư mục cha; mặc định dùng temp hệ thống.
 Qwen luôn có --yolo; OpenCode dùng permission=allow và OPENCODE_PERMISSION cho
 mọi tool. Plan/Reviewer chỉ đọc vẫn do prompt hướng dẫn.
@@ -170,7 +176,9 @@ Mỗi lần gọi docker run --rm --init có cidfile riêng; timeout/exception d
 container đó. Workspace và scratch mount cùng đường dẫn host để liên kết project/
 vẫn hợp lệ. CA bundle mount readonly; env SSL_CERT_FILE/NODE_EXTRA_CA_CERTS trỏ
 đúng path trong container. API key forward bằng tên env, không ghi vào image.
-Trong coding container dùng python của image, không dùng .venv host.
+Khi project là linked worktree, runner mount thêm Git common directory tại đúng
+đường dẫn tuyệt đối để git truy cập metadata. Trong coding container dùng python
+của image, không dùng .venv host.
 
 ## Compose: LangGraph và các CLI trong một container
 
@@ -198,7 +206,8 @@ OpenCode dùng options của model internal. File cấu hình Qwen được tự
 Format enable_thinking gửi {"enable_thinking": false}; chat_template_kwargs gửi
 {"chat_template_kwargs": {"enable_thinking": false}}. Giá trị true ghi đè để bật.
 YAML thinking phải là boolean thật hoặc null. Server/model cần hỗ trợ tham số.
-Không thay đổi no_stream, streaming tự nhiên hoặc pass/fail assessment.
+Không thay đổi pass/fail assessment. Báo cáo gốc và phản hồi hiển thị đều ẩn token
+trung gian bằng no_stream; UI nhận AIMessage hoàn chỉnh qua updates.
 
 
 ## Artifact chỉ đọc và preprocessing messages
@@ -216,17 +225,23 @@ START với các root, các edge đúng DAG và các leaf với END; mỗi node 
 qua Execute rồi Reviewer. Đây là kế hoạch, không phải trạng thái thực thi từng
 node. Client không render Mermaid vẫn đọc được bảng Markdown.
 
-Cả hai loại message có metadata `additional_kwargs.orchestrator_artifact`:
-`type` là `plan_handoff` hoặc `execution_plan`, `mime_type=text/markdown`,
-`version=1`, `read_only=true` và `attempt` bắt đầu từ 1. Artifact không được
-đưa vào schema PlanGraph hoặc yêu cầu LLM tự vẽ sơ đồ.
+Artifact-only có metadata `additional_kwargs.orchestrator_artifact`, gồm type,
+mime_type, version, read_only và attempt. Với message vừa có lời vừa có artifact,
+`orchestrator_artifacts` là list payload kèm content Markdown; `orchestrator_text`
+giữ đúng phần lời chưa ghép artifact. Phần lời và artifact cùng xuất hiện trong
+AIMessage.content; model chỉ sinh phần lời, runtime ghép payload sau đó.
 
-`runtime/artifacts.py:preprocess_messages(messages)` trả một list mới, lọc hai
-loại artifact trên và giữ nguyên các message khác. Initialize dùng hàm này cho
-cả hội thoại lẫn structured payload; Plan dùng trước khi serialize prompt;
-network dùng trước khi gọi Execute/Reviewer; Reviewer cũng lọc khi enrich task.
-Lịch sử state/checkpoint và `state.plan` không bị xóa. Agent mới nhận messages
-cần gọi hàm này tại biên tạo prompt/bàn giao để tránh gửi nội dung hiển thị vào LLM.
+`runtime/artifacts.py:preprocess_messages(messages)` trả list mới, loại artifact-only
+và bỏ payload của mọi type trong namespace artifact của orchestrator. Với mixed
+message, hàm giữ phần lời và bỏ metadata artifact/marker trình bày. Không xóa state
+chat hoặc `state.plan`. Initialize lọc cho cả hội thoại/structured payload, Plan
+lọc trước serialize prompt, network lọc trước Execute/Reviewer và Reviewer lọc
+khi enrich task. Model viết phản hồi cũng dùng cùng hàm trước khi lấy lịch sử/draft.
+
+`message_delta()` bỏ qua khác biệt chỉ do preprocessing: lịch sử sạch từ agent
+không ghi đè mixed message chứa artifact trong graph cha. Thay đổi nội dung thực
+sự cùng ID vẫn được truyền lên và upsert. Agent/model mới nhận messages phải dùng
+preprocessing tại biên đầu vào.
 
 ## Terminal Monitor và log CLI
 
@@ -236,7 +251,7 @@ Cả `langgraph.json` và `langgraph.docker.json` dùng
 | Endpoint GET | Nội dung |
 | --- | --- |
 | `/terminals`, `/terminals/` | Giao diện chỉ đọc, tự cập nhật log và hỗ trợ ANSI cơ bản |
-| `/terminals/api/files` | Danh sách file `.log`/`.txt` trong thư mục log |
+| `/terminals/api/files` | `files`: tên file tương thích cũ; `sessions`: tiêu đề, vai trò, task_id, trạng thái, thời gian; ưu tiên phiên đang chạy |
 | `/terminals/api/read` | Đọc theo `name`, byte `offset` và `file_id`; dữ liệu base64 |
 
 Compose dùng `http://localhost:2026/terminals`; host dev mặc định dùng
@@ -246,9 +261,26 @@ Viewer không bổ sung cơ chế đăng nhập riêng.
 Đặt `CLI_LOG_DIR=.local/cli-logs` trong `.env` để bật `run_logged()` cho local
 và Docker runner; để trống/bỏ biến để giữ runner capture output thông thường.
 Đường dẫn tương đối được resolve từ cwd của tiến trình LangGraph. Log mỗi lần
-chạy có timestamp UTC và UUID, chứa stdout/stderr được ghi trực tiếp; kết quả
-trả về agent vẫn tách stdout/stderr như trước. Log che giá trị các biến môi trường
-có tên chứa TOKEN, API_KEY, PASSWORD hoặc SECRET, kể cả chuỗi bị chia qua các chunk;
+chạy có timestamp UTC và UUID; sidecar `<name>.log.json` lưu metadata, được ghi
+atomically với quyền 0600. Log và metadata xuất hiện trước khi launch CLI, có
+trạng thái `running`, rồi chuyển `completed`/`failed`/`timed_out` khi kết thúc.
+Viewer dùng tiêu đề nhiệm vụ và vai trò thay tên file; instructions được rút gọn
+tối đa 160 ký tự, Plan lấy yêu cầu người dùng gần nhất, không gọi LLM đặt tên.
+Phiên cũ không có metadata dùng nhãn lịch sử. Danh sách và nội dung poll mỗi
+500 ms; chuyển phiên sẽ loại bỏ phản hồi đang đọc của phiên trước.
+
+Qwen chạy `--output-format stream-json --include-partial-messages`, OpenCode chạy
+`run --format json`. `cli_events.EventRenderer` chuyển JSONL thành văn bản tiến
+độ, phản hồi và tool; Qwen text delta xuất hiện ngay, OpenCode text/tool xuất hiện
+theo sự kiện hoàn tất từng phần do CLI hỗ trợ. Chưa có sự kiện mới thì viewer giữ
+nội dung hiện tại. `run_logged()` vẫn giữ raw stdout/stderr riêng trong kết quả;
+`run_llm_cli()` tách báo cáo assistant khỏi protocol bằng `report_text()` trước
+khi đưa vào structured assessment. Không gửi JSON sự kiện/echo prompt vào báo cáo.
+
+Log che giá trị các biến môi trường
+có tên chứa TOKEN, API_KEY, PASSWORD hoặc SECRET, kể cả chuỗi bị chia qua các chunk
+và giá trị JSON-escaped. Bộ lọc chỉ giữ suffix có thể là phần đầu token để log
+ngắn cũng được flush ngay; tiêu đề/metadata cũng che các giá trị này;
 đây không phải bộ phát hiện mọi dữ liệu nhạy cảm trong nội dung CLI.
 
 Log nằm ngoài scratch workdir, có quyền file 0600 và không tự xóa. Với Compose,
@@ -269,3 +301,228 @@ Sau khi đổi image: `docker compose up -d --build team`. Kiểm tra:
 `docker compose exec team glab --version`. Runner Docker CLI riêng chỉ forward
 các biến trong `FORWARDED_ENV`; cần bổ sung danh sách đó nếu muốn truyền thêm
 biến GitLab vào container con. Không commit `.env` hoặc file log chứa dữ liệu thật.
+
+
+## Git worktree theo task và review-gated merge local
+
+Mặc định `GIT_TASK_ISOLATION=true`, `GIT_TARGET_BRANCH=main`. Workspace phải là
+root repository có commit, đang checkout đúng nhánh đích và sạch; runtime từ chối
+repo bẩn, thư mục không phải Git hoặc nhánh không khớp, không tự stash/reset.
+`GIT_TASK_ISOLATION=false` giữ chế độ shared workspace cũ cho tương thích.
+Graph Execute độc lập vẫn làm việc tại workspace caller truyền; isolation được
+điều phối ở DAG qua `runtime/network.py:run_isolated_task()`.
+
+`runtime/git_tasks.py:TaskCheckout` thực hiện chu trình:
+
+1. Khóa repository, lấy HEAD của nhánh chính và tạo worktree/nhánh task duy nhất.
+2. Thả khóa, chạy Executor trên checkout riêng; các Executor chạy song song.
+3. Execute pass: runtime stage và commit thay đổi trong checkout đó. Các commit
+   tự động dùng identity Orchestrator / orchestrator@localhost, không đổi git config.
+4. Lấy khóa tích hợp, tạo nhánh/worktree review từ main mới nhất và merge task
+   vào đó. Nếu conflict, main không đổi; giữ worktree conflict để điều tra.
+5. Gọi Reviewer trên bản merge thử, kiểm tra code/test và ảnh hưởng tích hợp.
+6. Chỉ khi review completed/assessment pass, HEAD và trạng thái checkout review
+   không bị Reviewer sửa, main vẫn đúng phiên bản đã review và sạch, mới merge
+   `--ff-only` commit đã review vào main. Giữ khóa đến khi xong bước tích hợp.
+7. Thành công: dọn worktree bằng git worktree remove, giữ nhánh/commit và metadata
+   integration. Dọn lỗi không đổi một merge đã thành công thành failed.
+
+Khóa `flock` ở Git common directory phối hợp giữa các task và các tiến trình
+orchestrator cùng repository. Git operations đang chạy được chờ kết thúc trước
+khi nhả khóa nếu workflow bị cancel. Không chạy checkout/reset/merge thủ công
+trên workspace chính trong lúc workflow hoạt động; khóa không điều phối công cụ
+bên ngoài không tuân thủ khóa. Không push remote, không tạo hoặc merge GitLab MR.
+
+`results[task_id].integration` có `branch`, `target_branch`, `commit`,
+`merged_commit` và `status=merged` khi thành công. Khi chưa merge, metadata có
+`worktree`, `review_worktree`, `base_commit`, `status=not_merged`. Plan nhận metadata
+trong execution_history để phân tích conflict hoặc giao task phục hồi từ main
+mới nhất và thay đổi của nhánh lỗi. Không tự bỏ thay đổi của task khác để hết conflict.
+Task phụ thuộc chỉ chạy sau khi task trước completed và đã merge.
+
+Worktree lỗi được giữ; worktree thành công được dọn, nhánh không tự xóa.
+`GIT_WORKTREE_ROOT` mặc định `/tmp/orchestrator-worktrees`; với Compose cần đặt
+vào thư mục mount phù hợp nếu muốn giữ file chưa commit qua recreate container.
+Git branches/commits vẫn nằm trong repository được mount. `.env` và file ignored
+không được sao chép sang worktree mới; cấu hình CLI được truyền qua môi trường.
+Các dependency môi trường test của repository cần sẵn có ở checkout mới.
+
+Reviewer phải kiểm tra tác động tích hợp và các regression test cần thiết.
+Chưa có node kiểm thử toàn repository riêng ở cuối workflow; worktree cũng
+không phải ranh giới bảo mật OS vì Git metadata và filesystem vẫn cùng user.
+
+
+## Skills config riêng theo CLI
+
+`runtime/cli_skills.py` đọc `config/cli/qwen.yaml` hoặc
+`config/cli/opencode.yaml` theo CLI được role YAML chọn. Có thể override từng file
+bằng `QWEN_SKILLS_CONFIG` / `OPENCODE_SKILLS_CONFIG`; đường dẫn override tương đối
+được resolve từ cwd tiến trình LangGraph. Đường dẫn trong `skills.paths` luôn
+resolve từ thư mục chứa YAML; hỗ trợ đường dẫn tuyệt đối và `~`.
+
+Schema có `skills.enabled` (boolean, mặc định true), `skills.paths`
+(list đường dẫn chung, mặc định rỗng) và `skills.roles` (mapping plan/execute/reviewer
+sang list đường dẫn). Role không hợp lệ hoặc list sai kiểu bị từ chối. Path trỏ vào một skill hoặc collection chứa các
+thư mục skill con trực tiếp; không quét sâu đệ quy. Skill cần YAML frontmatter
+với name khớp tên thư mục, tối đa 64 ký tự chữ thường/số, phân cách bằng dấu gạch
+ngang đơn; description là chuỗi 1–1024 ký tự. Hai nguồn khác nhau có cùng name
+bị từ chối để tránh chọn nhầm skill; chọn trùng đúng một nguồn được gộp lại.
+Config/path/metadata không hợp lệ làm CLI thất bại trước khi subprocess chạy.
+
+`run_llm_cli()` nạp cấu hình mỗi invocation, rồi copy nguyên thư mục skill vào
+scratch `.qwen/skills/<name>` hoặc `.opencode/skills/<name>`. Scripts/assets được
+copy cùng; không dùng symlink nguồn nên container Docker có đủ nội dung qua mount
+scratch sẵn có. Skills nguồn ở host cần truy cập được từ tiến trình LangGraph;
+Compose không tự biến đường dẫn host ngoài mount thành đường dẫn trong container.
+Copy được dọn cùng scratch kể cả CLI lỗi/timeout, không stage vào Git worktree và
+không làm bẩn main. Không tự nhúng toàn bộ SKILL.md vào prompt; CLI tự discovery/load.
+
+Đây là config lựa chọn skills của orchestrator, không phải file settings native
+của Qwen/OpenCode. `enabled: false` không tắt skills user/global/bundled vốn có của
+CLI. Empty paths và không có role được chọn sẽ không stage thêm skill.
+Runner hợp nhất common paths với đường dẫn của role và gộp nguồn trùng nhau. Những hạn chế riêng của
+phiên bản CLI đang dùng vẫn áp dụng. Initialize chỉ dùng ChatOpenAI nên không đọc
+hai file skills này.
+
+Tài liệu native: [Qwen Skills](https://qwenlm.github.io/qwen-code-docs/en/users/features/skills/),
+[OpenCode Skills](https://opencode.ai/docs/skills/).
+
+
+## Runtime INFO logging
+
+`runtime/logging.py` cung cấp logger `orchestrator`, `logged_node()`, `operation()`
+và `event()`. Wrapper node giữ đường gọi sync/async, RunnableConfig/callbacks và
+kết quả state; không chèn thêm AIMessage hoặc nội dung vào prompt. Các node xử lý
+trong subgraph role, các node điều phối root và task động trong DAG đều có log.
+
+Các mốc chính:
+
+| Event | Thông tin |
+| --- | --- |
+| `node.start`, `node.end` | Agent/node, task/thread, node_run_id, thời gian, status/assessment/số task |
+| `llm.start`, `llm.end` | Purpose conversation/structured, model, endpoint origin, timeout, schema/method, kết quả |
+| `cli.start`, `cli.end`, `cli.process_exit` | CLI/runtime/model, thời gian, exit code, kích thước input/output |
+| `cli.prepared`, `cli.log_file` | Scratch/project được giao, số skills, đường dẫn log CLI |
+| `git.operation.*`, `git.lock.*`, `git.merged` | Checkout/commit/review/merge, chờ/giữ/thả khóa và commit được merge |
+| `task.reused`, `task.skipped` | Dùng lại việc đã merge hoặc bỏ qua do phụ thuộc thất bại |
+
+Operation lỗi ghi event `.error` ở ERROR với error_type; cancel ghi `.cancelled`
+ở WARNING. Lỗi đã được agent bắt và chuyển thành state vẫn có status/has_error ở
+node.end. Không dump state, prompt, response body hoặc chuỗi exception. Conversation
+LLM ghi usage_metadata nếu có; structured output chưa thu thập raw token usage.
+Endpoint bỏ user/password/path/query; giá trị biến môi trường có tên chứa TOKEN,
+API_KEY, PASSWORD, SECRET được che trong các field log.
+
+Logger dùng handler riêng ra stderr, không sửa root logger hoặc bật debug log cho
+HTTP client. `ORCHESTRATOR_LOG_LEVEL` hỗ trợ DEBUG/INFO/WARNING/ERROR/CRITICAL,
+mặc định INFO. Cấu hình được đọc lại tại đầu node/CLI để nhận `.env` đã load sau
+import. `ORCHESTRATOR_LOG_FILE` chọn file; nếu bỏ trống và có CLI_LOG_DIR thì dùng
+`<CLI_LOG_DIR>/orchestrator.log`, đọc được từ Terminal Monitor. Nếu không có cả hai
+thì chỉ stderr. File ngoài CLI_LOG_DIR không tự xuất hiện trong viewer.
+
+ContextVar giữ riêng agent/node/task/thread khi chạy song song và được truyền qua
+worker thread. thread_id lấy từ config configurable/metadata; node_run_id duy nhất
+cho mỗi lần vào node. File runtime append, không tự rotate; stderr có thể xem qua
+`docker compose logs -f team`. Không đổi cơ chế no_stream hoặc filter artifact.
+
+Các async node gọi configure_logging qua asyncio.to_thread. QueueHandler chỉ đưa
+record vào queue; QueueListener ghi stderr/file trên thread riêng và drain khi
+shutdown. Constructor ChatOpenAI/structured model, build execution DAG và thao tác
+Git/kiểm tra ancestor/file lock đều được chạy ngoài event loop. Khóa dùng flock
+nonblocking với async sleep khi bận, không giữ event loop để chờ I/O. Test hồi quy
+bật Blockbuster cho Initialize, logging file, DAG root, merge local và approved reuse.
+
+
+## Bộ skills theo role đã cài
+
+`two_phase.py:coding()` truyền `role=agent_name` vào `run_llm_cli()`. Runner gọi
+`configured_skills(cli, role=role)` trên worker thread, stage riêng vào scratch
+của invocation và ghi tên skills ở event `cli.prepared`. Không nhúng SKILL.md
+vào prompt và không stage skill của role khác. `config/cli/qwen.yaml` và
+`config/cli/opencode.yaml` đều có mapping mặc định:
+
+- Plan: repository-discovery, dependency-planning, replan-recovery.
+- Execute: scoped-implementation, systematic-debugging, verification-before-completion, ponytail.
+- Reviewer: evidence-based-review, integration-regression, verification-before-completion.
+
+Các skills scope/discovery/planning/review do dự án viết, phù hợp natural plan →
+structured DAG và review-gated local merge. Skill `systematic-debugging` và
+`verification-before-completion` được tải từ obra/superpowers; `ponytail` từ
+DietrichGebert/ponytail. Thư mục `skills/vendor` giữ tài nguyên đi kèm và MIT LICENSE.
+`skills/sources.json` ghi repository, commit pinned, upstream SKILL.md SHA-256,
+local SHA-256 và ghi chú điều chỉnh. Không chạy installer/plugin/hooks của các
+repo upstream; chỉ sử dụng các skill folders đã chọn.
+
+Điều chỉnh bản vendored: Ponytail dùng full mode trong một Execute invocation;
+không tự thay scope theo một chế độ hội thoại. Debugging không phụ thuộc skill
+TDD chưa cài và trả architectural blocker về Plan. Verification tôn trọng review
+chỉ đọc và không tự commit/push/merge. Cả ba vẫn cần tuân theo hợp đồng role và
+hướng dẫn repository, không tạo workflow điều phối thứ hai.
+
+Initialize không có CLI invocation. Caller trực tiếp có thể truyền role vào
+run_llm_cli; không có role thì chỉ common paths. Khi cần đổi bộ skill theo backend,
+sửa mapping roles trong đúng file config CLI hoặc override file qua biến *_SKILLS_CONFIG.
+
+
+## Hợp đồng prompt và skills
+
+Prompt role ở `config/*.yaml` xác định quyền và đầu ra; skills hỗ trợ thực hiện
+trong giới hạn đó, không tự cấp quyền commit/merge/dispatch. Các ví dụ upstream
+là kỹ thuật tham khảo, không phải chỉ dẫn chạy nếu vi phạm vai trò được giao.
+
+| Role | Quyền và kết quả |
+| --- | --- |
+| Initialize | Hội thoại làm rõ; readiness quyết định bàn giao, không CLI/skills/code |
+| Plan | Khảo sát chỉ đọc, natural plan/replan; không ghi plan file hoặc tự chạy agent |
+| Execute | Sửa đúng checkout/task, Ponytail full và kiểm chứng; không tự commit/merge |
+| Reviewer | Xác minh code/candidate, chạy checks; không sửa/revert source hoặc tạo test |
+| Structured pass | Chuyển đổi/đánh giá báo cáo; không tự thực thi hoặc bịa bằng chứng |
+
+Khi Git isolation bật, runtime commit sau Execute pass, tạo candidate trên nhánh
+đích mới nhất, gọi Reviewer rồi mới merge local nếu review pass. Prompt phân biệt
+standalone/shared mode, nơi không mặc định có candidate hoặc merge. Tên main trong
+skills là cách gọi nhánh chính, không thay thế target_branch trong metadata.
+Reviewer không áp dụng ví dụ red/green bằng cách revert code hoặc update snapshot;
+kiểm tra không được làm bẩn candidate. Thiếu bằng chứng bắt buộc là blocker; thay
+đổi tài liệu/cấu hình đơn giản không phải tạo test hình thức. CLI không có vòng
+chờ tương tác: Execute/Reviewer báo blocker để Plan/runtime xử lý.
+
+`PlanGraph` cho phép deserialize `nodes=[], edges=[]` đúng như structured prompt
+khi kế hoạch bị chặn/không có task hợp lệ. `validate_plan_graph()` vẫn từ chối
+nodes rỗng trước khi tạo artifact hoặc mạng Execute. Đây là tín hiệu dừng với
+status failed, không phải kế hoạch thành công hoặc completed. Model không cần
+bịa một node để thỏa minItems. Graph có task vẫn phải thỏa mọi ràng buộc DAG.
+
+
+## ChatOpenAI viết phản hồi cho người dùng
+
+`runtime/responses.py` là lớp diễn đạt chung gọi từ wrapper node trong logging.py.
+Chỉ xử lý các AIMessage mới, không phải artifact-only, chưa có marker
+`orchestrator_response.rewritten=true`. Mỗi message được thêm một call ChatOpenAI
+plain text. Các node ở graph cha không viết lại message đã xử lý từ graph con.
+Hợp đồng ID/name giữ nguyên; marker được lọc khỏi lịch sử gửi model.
+
+`config/response.yaml` có prompt, timeout (60 giây), history_messages (16),
+source_chars (16000) và thinking=false. Model/endpoint/key kế thừa options role,
+DECISION_* hoặc QWEN_*. Constructor/config đọc trên worker thread. Phản hồi sinh
+bằng plain text với streaming=False/disable_streaming=True; không cần thêm JSON
+schema. Cả invoke/ainvoke đều gắn no_stream để không lộ báo cáo trước khi viết lại.
+
+Input gồm lịch sử đã lọc artifact, nhãn role, draft và facts thật (status, báo cáo,
+assessment, lỗi, clarification, kết quả task). Lịch sử được serialize thành dữ
+liệu dưới một system prompt diễn đạt, không đưa SystemMessage trong lịch sử thành
+quyền mới. Lấy lịch sử sau preprocessing để artifact không chiếm số lượt. Draft và
+report bị giới hạn source_chars, có cờ source_truncated; credentials được che.
+Prompt yêu cầu dùng ngôn ngữ/mức độ kỹ thuật phù hợp, không bịa nguyên nhân,
+không coi một bước pass là đã merge hoặc toàn workflow hoàn tất.
+
+Field output/natural_plan/assessment/results giữ báo cáo/quyết định kỹ thuật gốc.
+Initialize structured payload có thêm natural_response gốc để bản diễn đạt không
+làm mất điều kiện/câu hỏi. Lớp phản hồi không đổi status, gọi retry/replan hay sửa
+kết quả merge. Khi lỗi, chỉ bỏ phần lời chưa viết được, ghi response_error và log;
+không thay bằng raw report hoặc câu mẫu. Artifact tất định vẫn được giữ.
+
+Plan phát phần lời kế hoạch và artifact ở cùng update; lớp phản hồi tạo phần lời,
+rồi attach_artifacts() ghép payload vào AIMessage. Artifact-only bàn giao không
+cần gọi model. Đầu vào model phản hồi lẫn các agent tiếp theo đều bỏ payload này,
+nhưng người dùng vẫn thấy đầy đủ phần lời và artifact trong lịch sử state.

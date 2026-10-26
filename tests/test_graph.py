@@ -27,6 +27,11 @@ def assessment(verdict, reason):
 
 class GraphIntegrationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        from tests.response_helpers import install_response_model
+        install_response_model(self)
+        isolation = patch.dict('os.environ', {'GIT_TASK_ISOLATION': 'false'})
+        isolation.start()
+        self.addCleanup(isolation.stop)
         initializer = patch('orchestrator.agents.initialize.ChatOpenAI')
         chat = initializer.start()
         self.addCleanup(initializer.stop)
@@ -54,8 +59,8 @@ class GraphIntegrationTests(unittest.IsolatedAsyncioTestCase):
         names = [message.name for message in result['messages']]
         self.assertEqual(names.count('initialize'), 1)
         self.assertEqual(names.count('plan'), 4)
-        artifacts = [m for m in result['messages'] if m.additional_kwargs.get('orchestrator_artifact', {}).get('type') == 'execution_plan']
-        self.assertEqual([m.additional_kwargs['orchestrator_artifact']['attempt'] for m in artifacts], [1, 2])
+        artifacts = [m for m in result['messages'] if any(a.get('type') == 'execution_plan' for a in m.additional_kwargs.get('orchestrator_artifacts', []))]
+        self.assertEqual([m.additional_kwargs['orchestrator_artifacts'][0]['attempt'] for m in artifacts], [1, 2])
         self.assertEqual(names.count('execute'), 3)
         self.assertEqual(names.count('reviewer'), 3)
         self.assertEqual(len(result['messages']), 20)

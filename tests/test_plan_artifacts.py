@@ -11,6 +11,10 @@ def make_plan():
 
 
 class PlanArtifactTests(unittest.TestCase):
+    def setUp(self):
+        from tests.response_helpers import install_response_model
+        install_response_model(self)
+
     def test_render_parallel_join_and_safe_generated_ids(self):
         message = plan_artifact(make_plan(), attempt=2)
         self.assertEqual(message.additional_kwargs[ARTIFACT_KEY]['attempt'], 2)
@@ -44,6 +48,10 @@ class PlanArtifactTests(unittest.TestCase):
 
 
 class PlanHandoffStreamingTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from tests.response_helpers import install_response_model
+        install_response_model(self)
+
     async def test_handoff_is_streamed_before_planner_runs(self):
         import asyncio
         from unittest.mock import patch

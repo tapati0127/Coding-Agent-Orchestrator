@@ -17,6 +17,8 @@ def assessment(status='pass', blockers=None):
 
 class ExecuteAgentTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        from tests.response_helpers import install_response_model
+        install_response_model(self)
         env = patch.dict('os.environ', {'QWEN_BASE_URL': 'http://internal/v1', 'QWEN_MODEL': 'coder'})
         env.start()
         self.addCleanup(env.stop)
@@ -41,6 +43,7 @@ class ExecuteAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['messages'][-1].name, 'execute')
         self.assertIn('no_stream', self.structured.ainvoke.call_args.kwargs['config']['tags'])
         self.assertIn('Preserve ${value} and {braces}', cli.call_args.args[0])
+        self.assertEqual(cli.call_args.kwargs['task_title'], 'Preserve ${value} and {braces}')
         self.assertIn('- API works\n- Tests pass', cli.call_args.args[0])
         payload = json.loads(self.structured.ainvoke.call_args.args[0][1].content)
         self.assertEqual(payload['report'], result['output'])

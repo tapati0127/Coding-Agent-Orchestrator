@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 from string import Template
-from langchain_core.messages import messages_to_dict
+from langchain_core.messages import AIMessage, messages_to_dict
 from langchain_openai import ChatOpenAI
 from orchestrator.runtime.artifacts import plan_artifact, preprocess_messages
 from orchestrator.runtime.cli import run_llm_cli
@@ -40,7 +40,8 @@ def build_plan_agent(config_path: str | Path = DEFAULT_CONFIG, **llm_options):
         validate_plan_graph(plan)
         return {'natural_plan': state['output'], 'plan': plan.model_dump(),
                 'status': 'planned', 'error': '',
-                'messages': [plan_artifact(plan, attempt=state.get('replan_count', 0) + 1)]}
+                'messages': [AIMessage(content=f'Kế hoạch đã được kiểm tra, gồm {len(plan.nodes)} nhiệm vụ. Chưa thực thi các nhiệm vụ mới của kế hoạch lần này.', name='plan'),
+                             plan_artifact(plan, attempt=state.get('replan_count', 0) + 1)]}
 
     def failure(state, reason):
         return {'natural_plan': state.get('output', ''), 'plan': {},

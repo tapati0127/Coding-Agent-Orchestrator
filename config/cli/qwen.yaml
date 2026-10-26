@@ -1,0 +1,17 @@
+# qwen: native skills are staged into .qwen/skills for each invocation.
+# Paths are relative to this YAML. paths applies to every role; roles adds
+# only the selection for that agent. Standalone CLI calls use paths only.
+skills:
+  enabled: true
+  paths: []
+  roles:
+    plan:
+      - ../../skills/plan
+    execute:
+      - ../../skills/execute
+      - ../../skills/vendor/superpowers/systematic-debugging
+      - ../../skills/vendor/superpowers/verification-before-completion
+      - ../../skills/vendor/ponytail/ponytail
+    reviewer:
+      - ../../skills/reviewer
+      - ../../skills/vendor/superpowers/verification-before-completion

@@ -12,6 +12,10 @@ from orchestrator.schemas import Assessment
 
 
 class MilestoneMessageTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from tests.response_helpers import install_response_model
+        install_response_model(self)
+
     async def test_start_arrives_before_cli_finishes_and_result_replaces_same_id(self):
         gate = Event()
         def coding(*args, **kwargs):

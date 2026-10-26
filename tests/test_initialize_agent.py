@@ -18,6 +18,8 @@ def decision(ready, missing=None):
 
 class InitializeAgentTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        from tests.response_helpers import install_response_model
+        install_response_model(self)
         env = patch.dict(os.environ, {'QWEN_BASE_URL': 'http://internal/v1', 'QWEN_MODEL': 'coder'})
         env.start()
         self.addCleanup(env.stop)
@@ -44,9 +46,9 @@ class InitializeAgentTests(unittest.IsolatedAsyncioTestCase):
         self.structure.ainvoke.assert_called_once()
         natural_config = self.chat.return_value.ainvoke.call_args.kwargs['config']
         structured_config = self.structure.ainvoke.call_args.kwargs['config']
-        self.assertNotIn('no_stream', natural_config.get('tags', []))
+        self.assertIn('no_stream', natural_config.get('tags', []))
         self.assertIn('no_stream', structured_config['tags'])
-        self.assertFalse(self.chat.call_args_list[0].kwargs['disable_streaming'])
+        self.assertTrue(self.chat.call_args_list[0].kwargs['disable_streaming'])
         self.assertTrue(self.chat.call_args_list[1].kwargs['disable_streaming'])
 
     async def test_reply_then_user_answer_reaches_plan(self):
@@ -67,14 +69,15 @@ class InitializeAgentTests(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(self.structure.ainvoke.call_args.args[0][1].content)
         self.assertEqual(payload['messages'][-1]['data']['content'], 'I will hand the health endpoint task to Plan')
 
-    async def test_structured_stage_never_emits_messages_and_keeps_reply_on_failure(self):
+    async def test_structured_failure_emits_human_response_and_keeps_original_reply(self):
         self.structure.ainvoke.side_effect = RuntimeError('offline')
         with tempfile.TemporaryDirectory() as workspace, patch.dict(os.environ, {'WORKSPACE_ROOT': workspace}):
             updates = [update async for update in build_initialize_agent().astream({'messages': [('user', 'Task')]}, stream_mode='updates')]
         coding = next(update['coding'] for update in updates if 'coding' in update)
         structured = next(update['structure'] for update in updates if 'structure' in update)
         self.assertEqual(len(coding['messages']), 1)
-        self.assertNotIn('messages', structured)
+        self.assertEqual(structured['messages'][0].name, 'initialize')
+        self.assertTrue(structured['messages'][0].additional_kwargs['orchestrator_response']['rewritten'])
         self.assertEqual(structured['status'], 'failed')
 
     def test_sync_support_and_inconsistent_ready_is_rejected(self):
@@ -90,5 +93,5 @@ class InitializeAgentTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as workspace, patch.dict(os.environ, {'WORKSPACE_ROOT': workspace}):
             result = await build_initialize_agent().ainvoke({'messages': [('user', 'Task')]})
         self.assertEqual(result['status'], 'failed')
-        self.assertEqual(len(result['messages']), 1)
+        self.assertEqual(len(result['messages']), 2)
         self.structure.ainvoke.assert_not_called()

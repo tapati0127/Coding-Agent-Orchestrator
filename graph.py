@@ -3,6 +3,7 @@
 Use build_graph() for custom configuration; graph is the default compiled graph.
 Importing this module builds graph structure only, without CLI/API calls.
 """
+import asyncio
 from pathlib import Path
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
@@ -15,6 +16,8 @@ from orchestrator.runtime.network import build_execution_graph, task_signature, 
 from orchestrator.runtime.two_phase import CONFIG_ROOT, read_settings
 from orchestrator.runtime.status import team_progress
 from orchestrator.runtime.artifacts import plan_handoff_artifact
+from orchestrator.runtime.git_tasks import isolation_enabled
+from orchestrator.runtime.logging import logged_node
 from orchestrator.schemas import PlanGraph
 from orchestrator.state import WorkflowState as PlanState
 
@@ -48,14 +51,16 @@ def build_graph(config_path: str | Path = CONFIG_ROOT / 'plan.yaml', *,
 
     def announce_execution(state: PlanState):
         count = len(state['plan']['nodes'])
-        return {'messages': [team_progress(f'Bắt đầu thực thi {count} nhiệm vụ; mỗi Execute pass sẽ được Reviewer kiểm tra lại.')]}
+        suffix = ' Task chỉ hoàn tất sau khi merge Git local.' if isolation_enabled() else ''
+        return {'messages': [team_progress(f'Bắt đầu thực thi {count} nhiệm vụ; mỗi Execute pass sẽ được Reviewer kiểm tra lại.' + suffix)]}
 
     def summarize_execution(state: PlanState):
         results = state['results']
         passed = sum(item['status'] == 'completed' for item in results.values())
         failed = [key for key, item in results.items() if item['status'] == 'failed']
         skipped = [key for key, item in results.items() if item['status'] == 'skipped']
-        content = f'Kết quả lần chạy: {passed}/{len(results)} nhiệm vụ đã được Reviewer duyệt.'
+        completed_label = 'Reviewer duyệt và merge Git local' if isolation_enabled() else 'Reviewer duyệt'
+        content = f'Kết quả lần chạy: {passed}/{len(results)} nhiệm vụ đã được {completed_label}.'
         if failed:
             content += ' Chưa đạt: ' + ', '.join(failed) + '.'
         if skipped:
@@ -66,7 +71,7 @@ def build_graph(config_path: str | Path = CONFIG_ROOT / 'plan.yaml', *,
         return {'messages': [team_progress(content)]}
 
     async def run_network(state: PlanState, config: RunnableConfig):
-        network = build_execution_graph(PlanGraph.model_validate(state["plan"]), executor,
+        network = await asyncio.to_thread(build_execution_graph, PlanGraph.model_validate(state["plan"]), executor,
             reviewer=reviewer, messages=state["messages"], approved_work=state["approved_work"])
         network_config = {**config, "recursion_limit": max(config.get("recursion_limit", 25), len(state["plan"]["nodes"]) + 2)}
         result = await network.ainvoke({"workspace": state["workspace"], "results": {}, "messages": state["messages"]}, config=network_config)
@@ -88,21 +93,22 @@ def build_graph(config_path: str | Path = CONFIG_ROOT / 'plan.yaml', *,
                 error += f"; replan limit reached ({max_replans})"
         return {"results": result["results"], "execution_history": history, "approved_work": list(approved.values()),
                 "status": "completed" if success else "failed", "error": error,
-                "messages": message_delta(result.get("messages", []), state["messages"])}
+                "messages": message_delta(result.get("messages", []), state["messages"]),
+                "response_error": result.get("response_error") or state.get("response_error", "")}
 
     workflow = StateGraph(PlanState)
     workflow.add_node('initialize', initializer)
-    workflow.add_node('announce_plan', announce_plan)
+    workflow.add_node('announce_plan', logged_node('team', 'announce_plan', announce_plan, response_options=llm_options))
     workflow.add_node('plan', planner)
     workflow.add_edge('announce_plan', 'plan')
     workflow.add_edge(START, 'initialize')
     workflow.add_conditional_edges('initialize', lambda s: 'announce_plan'
         if s['status'] == 'ready_for_plan' else END, ['announce_plan', END])
     if dispatch_execute:
-        workflow.add_node('announce_execution', announce_execution)
-        workflow.add_node('execute_network', run_network)
-        workflow.add_node('summarize_execution', summarize_execution)
-        workflow.add_node('prepare_replan', prepare_replan)
+        workflow.add_node('announce_execution', logged_node('team', 'announce_execution', announce_execution, response_options=llm_options))
+        workflow.add_node('execute_network', logged_node('team', 'execute_network', run_network, response_options=llm_options))
+        workflow.add_node('summarize_execution', logged_node('team', 'summarize_execution', summarize_execution, response_options=llm_options))
+        workflow.add_node('prepare_replan', logged_node('team', 'prepare_replan', prepare_replan, response_options=llm_options))
         workflow.add_conditional_edges('plan', lambda s: 'announce_execution' if s['status'] == 'planned' else END, ['announce_execution', END])
         workflow.add_edge('announce_execution', 'execute_network')
         workflow.add_edge('execute_network', 'summarize_execution')

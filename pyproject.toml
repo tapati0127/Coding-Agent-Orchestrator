@@ -25,3 +25,16 @@ include = ["orchestrator*"]
 
 [tool.setuptools.data-files]
 config = ["config/*.yaml"]
+"config/cli" = ["config/cli/*.yaml"]
+
+# Repository-local skill snapshots used by both CLI backends.
+"skills" = ["skills/sources.json"]
+"skills/execute/scoped-implementation" = ["skills/execute/scoped-implementation/*"]
+"skills/plan/dependency-planning" = ["skills/plan/dependency-planning/*"]
+"skills/plan/replan-recovery" = ["skills/plan/replan-recovery/*"]
+"skills/plan/repository-discovery" = ["skills/plan/repository-discovery/*"]
+"skills/reviewer/evidence-based-review" = ["skills/reviewer/evidence-based-review/*"]
+"skills/reviewer/integration-regression" = ["skills/reviewer/integration-regression/*"]
+"skills/vendor/ponytail/ponytail" = ["skills/vendor/ponytail/ponytail/*"]
+"skills/vendor/superpowers/systematic-debugging" = ["skills/vendor/superpowers/systematic-debugging/*"]
+"skills/vendor/superpowers/verification-before-completion" = ["skills/vendor/superpowers/verification-before-completion/*"]

@@ -7,6 +7,10 @@ from orchestrator.agents.reviewer import build_reviewer_agent
 
 
 class ReviewerAgentTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from tests.response_helpers import install_response_model
+        install_response_model(self)
+
     async def test_cli_gets_messages_task_and_execution_report_then_assesses(self):
         for verdict in ('pass', 'fail'):
             with self.subTest(verdict=verdict), tempfile.TemporaryDirectory() as workspace:

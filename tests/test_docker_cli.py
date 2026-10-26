@@ -48,3 +48,29 @@ class DockerCliTests(unittest.TestCase):
                 run_llm_cli('Task','opencode',cwd=root,base_url='http://internal/v1',model='coder')
         self.assertEqual(observed[-1], ['/bin/docker','rm','--force','timeout-container'])
         self.assertFalse(Path(observed[0][observed[0].index('--workdir')+1]).exists())
+
+    def test_linked_worktree_mounts_common_git_metadata(self):
+        from orchestrator.runtime.git_tasks import git
+        from orchestrator.runtime.docker_cli import run_in_docker
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            repo, project, scratch = root / 'repo', root / 'task', root / 'scratch'
+            repo.mkdir()
+            scratch.mkdir()
+            git(repo, 'init', '-b', 'main')
+            (repo / 'file.txt').write_text('base')
+            git(repo, 'add', '.')
+            git(repo, 'commit', '-m', 'Initial')
+            git(repo, 'worktree', 'add', '-b', 'task', str(project))
+            real_run = subprocess.run
+            observed = []
+            def run(command, **kwargs):
+                if command[0] == 'git':
+                    return real_run(command, **kwargs)
+                observed.append(command)
+                return subprocess.CompletedProcess(command, 0, 'Done', '')
+            with patch('orchestrator.runtime.docker_cli.subprocess.run', side_effect=run):
+                run_in_docker(['qwen'], docker='/bin/docker', workdir=scratch, project=project,
+                              env={}, timeout=5)
+            common = repo / '.git'
+            self.assertIn(f'type=bind,src={common},dst={common}', observed[0])

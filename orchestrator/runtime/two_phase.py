@@ -15,6 +15,8 @@ from .cli import run_llm_cli
 from .chat import build_chat_model, no_stream_config
 from .status import progress_message
 from .thinking import thinking_options
+from .artifacts import preprocess_messages
+from .logging import logged_node, operation, llm_fields, outcome
 
 CONFIG_ROOT = Path(__file__).resolve().parents[2] / 'config'
 
@@ -68,8 +70,13 @@ def build_two_phase_graph(*, state_schema, output_schema, settings, prepare,
 
     def coding(state):
         try:
+            title = state.get('task', {}).get('instructions', '')
+            if not title:
+                title = next((m.content for m in reversed(preprocess_messages(state.get('messages', [])))
+                              if m.type == 'human' and isinstance(m.content, str)), '')
             output = cli_runner(state['prompt'], cli=settings.get('cli', 'qwen'),
-                cwd=state['workspace'], timeout=timeout,
+                cwd=state['workspace'], timeout=timeout, role=agent_name,
+                task_title=title, task_id=state.get('task', {}).get('task_id'),
                 **{key: options.get(key) for key in ('base_url', 'model', 'api_key', 'thinking', 'thinking_format')})
             if not output.strip():
                 raise ValueError('CLI returned empty output')
@@ -101,15 +108,22 @@ def build_two_phase_graph(*, state_schema, output_schema, settings, prepare,
 
     def structure(state, config: RunnableConfig):
         try:
-            output = structured_model().invoke(inputs(state), config=no_stream_config(config))
-            return finish(state, output_schema.model_validate(output))
+            with operation('llm', **llm_fields(options, purpose='structured', schema=output_schema.__name__), method=settings.get('structured_output_method', 'json_schema'), timeout_s=structure_timeout) as summary:
+                output = structured_model().invoke(inputs(state), config=no_stream_config(config))
+                update = finish(state, output_schema.model_validate(output))
+                summary.update(outcome(update))
+                return update
         except Exception:
             return failure(state, 'Structured output failed or returned an invalid result')
 
     async def astructure(state, config: RunnableConfig):
         try:
-            output = await asyncio.wait_for(structured_model().ainvoke(inputs(state), config=no_stream_config(config)), timeout=structure_timeout)
-            return finish(state, output_schema.model_validate(output))
+            with operation('llm', **llm_fields(options, purpose='structured', schema=output_schema.__name__), method=settings.get('structured_output_method', 'json_schema'), timeout_s=structure_timeout) as summary:
+                model = await asyncio.to_thread(structured_model)
+                output = await asyncio.wait_for(model.ainvoke(inputs(state), config=no_stream_config(config)), timeout=structure_timeout)
+                update = finish(state, output_schema.model_validate(output))
+                summary.update(outcome(update))
+                return update
         except Exception:
             return failure(state, 'Structured output failed or returned an invalid result')
 
@@ -146,13 +160,13 @@ def build_two_phase_graph(*, state_schema, output_schema, settings, prepare,
         return {'messages': [progress_message(agent_name, task_id, content)]}
 
     graph = StateGraph(state_schema)
-    graph.add_node('prepare', prepare)
-    graph.add_node('coding', natural_node if natural_node is not None else coding)
-    graph.add_node('structure', RunnableLambda(structure, afunc=astructure).with_config(tags=['no_stream']))
+    graph.add_node('prepare', logged_node(agent_name, 'prepare', prepare, response_options=options))
+    graph.add_node('coding', logged_node(agent_name, 'coding', natural_node if natural_node is not None else coding, response_options=options))
+    graph.add_node('structure', logged_node(agent_name, 'structure', RunnableLambda(structure, afunc=astructure), response_options=options).with_config(tags=['no_stream']))
     graph.add_edge(START, 'prepare')
     if natural_node is None:
-        graph.add_node('announce_start', announce_start)
-        graph.add_node('announce_result', announce_result)
+        graph.add_node('announce_start', logged_node(agent_name, 'announce_start', announce_start, response_options=options))
+        graph.add_node('announce_result', logged_node(agent_name, 'announce_result', announce_result, response_options=options))
         graph.add_edge('prepare', 'announce_start')
         graph.add_edge('announce_start', 'coding')
     else:

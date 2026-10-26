@@ -47,13 +47,15 @@ class ExecuteEdge(BaseModel):
 
 
 class PlanGraph(BaseModel):
-    """Only nodes and edges. START/END are connected automatically."""
+    """Structured plan; empty nodes signal a stop and fail execution validation."""
     model_config = ConfigDict(extra="forbid", strict=True)
-    nodes: list[ExecuteNode] = Field(min_length=1)
+    nodes: list[ExecuteNode]
     edges: list[ExecuteEdge]
 
 
 def validate_plan_graph(plan: PlanGraph) -> dict[str, list[str]]:
+    if not plan.nodes:
+        raise ValueError("Plan has no executable tasks")
     parents = {node.id: [] for node in plan.nodes}
     if len(parents) != len(plan.nodes):
         raise ValueError("Duplicate node ID")
