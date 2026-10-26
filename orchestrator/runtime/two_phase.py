@@ -14,6 +14,7 @@ import yaml
 from .cli import run_llm_cli
 from .chat import build_chat_model, no_stream_config
 from .status import progress_message
+from .thinking import thinking_options
 
 CONFIG_ROOT = Path(__file__).resolve().parents[2] / 'config'
 
@@ -33,6 +34,7 @@ def read_settings(path):
             raise ValueError(f'{key} must be a nonempty string')
     if settings.get('structured_output_method', 'json_schema') not in {'json_schema', 'function_calling', 'json_mode'}:
         raise ValueError('Invalid structured_output_method')
+    thinking_options(settings)  # Validate per-role overrides before any model call.
     return settings
 
 
@@ -58,7 +60,7 @@ def build_two_phase_graph(*, state_schema, output_schema, settings, prepare,
     failure(state, reason)->updates. CLI failures can still be assessed, but the
     finish hook must never upgrade a failed CLI to a successful task.
     """
-    options = llm_options or {}
+    options = thinking_options(settings, llm_options)
     cli_runner = cli_runner or run_llm_cli
     chat_factory = chat_factory or ChatOpenAI
     timeout = settings.get('timeout', 1800)
@@ -68,11 +70,12 @@ def build_two_phase_graph(*, state_schema, output_schema, settings, prepare,
         try:
             output = cli_runner(state['prompt'], cli=settings.get('cli', 'qwen'),
                 cwd=state['workspace'], timeout=timeout,
-                **{key: options.get(key) for key in ('base_url', 'model', 'api_key')})
+                **{key: options.get(key) for key in ('base_url', 'model', 'api_key', 'thinking', 'thinking_format')})
             if not output.strip():
                 raise ValueError('CLI returned empty output')
             return {'output': output, 'cli_error': '',
-                    'messages': [AIMessage(content=output, name=agent_name)]}
+                    'messages': [AIMessage(content=output, name=agent_name),
+                        cli_finished_message(state)]}
         except subprocess.TimeoutExpired:
             reason = f'CLI timed out after {timeout}s'
         except Exception as exc:
@@ -81,7 +84,8 @@ def build_two_phase_graph(*, state_schema, output_schema, settings, prepare,
         for key in (options.get('api_key'), os.getenv('QWEN_API_KEY')):
             if key:
                 reason = reason.replace(key, '[REDACTED]')
-        update = {'output': '', 'cli_error': reason}
+        update = {'output': '', 'cli_error': reason,
+                  'messages': [cli_finished_message(state, failed=True)]}
         if stop_on_cli_error:
             update.update(failure({**state, **update}, reason))
         return update
@@ -109,13 +113,26 @@ def build_two_phase_graph(*, state_schema, output_schema, settings, prepare,
         except Exception:
             return failure(state, 'Structured output failed or returned an invalid result')
 
+    def cli_finished_message(state, *, failed=False):
+        task_id = state.get('task', {}).get('task_id', '')
+        label = agent_name.capitalize() + (f' {task_id}' if task_id else '')
+        cli = settings.get('cli', 'qwen')
+        if failed:
+            content = f'{label}: CLI {cli} đã kết thúc với lỗi hoặc quá thời gian.'
+        else:
+            content = f'{label}: CLI {cli} đã chạy xong. Đang xử lý kết quả structured output.'
+        return progress_message(agent_name, task_id,
+            content + ' Xem log chi tiết tại [Terminal Monitor](/terminals).')
+
     def announce_start(state):
         task_id = state.get('task', {}).get('task_id', '')
         label = {'plan': 'Plan đang khảo sát codebase và lập kế hoạch',
                  'execute': 'Execute bắt đầu triển khai nhiệm vụ',
                  'reviewer': 'Reviewer bắt đầu kiểm tra code và test'}.get(agent_name, 'Bắt đầu xử lý')
         suffix = f' {task_id}' if task_id else ''
-        return {'messages': [progress_message(agent_name, task_id, label + suffix + '.')]}
+        return {'messages': [progress_message(agent_name, task_id, label + suffix
+            + f" bằng CLI {settings.get('cli', 'qwen')}."
+            + ' Xem chi tiết tiến độ tại [Terminal Monitor](/terminals).')]}
 
     def announce_result(state):
         task_id = state.get('task', {}).get('task_id', '')

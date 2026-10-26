@@ -1,3 +1,6 @@
+# null: kế thừa .env; đặt true/false để ghi đè riêng role này.
+thinking: null
+thinking_format: null
 timeout: 120
 structure_timeout: 120
 structured_output_method: json_schema

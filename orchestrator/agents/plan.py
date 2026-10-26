@@ -4,6 +4,7 @@ from pathlib import Path
 from string import Template
 from langchain_core.messages import messages_to_dict
 from langchain_openai import ChatOpenAI
+from orchestrator.runtime.artifacts import plan_artifact, preprocess_messages
 from orchestrator.runtime.cli import run_llm_cli
 from orchestrator.runtime.two_phase import CONFIG_ROOT, build_two_phase_graph, read_settings, workspace_path
 from orchestrator.schemas import PlanGraph, validate_plan_graph
@@ -21,7 +22,7 @@ def build_plan_agent(config_path: str | Path = DEFAULT_CONFIG, **llm_options):
         if not state.get('messages'):
             raise ValueError('messages must not be empty')
         prompt = Template(settings['prompt']).substitute(workspace=workspace,
-            messages=json.dumps(messages_to_dict(state['messages']), ensure_ascii=False))
+            messages=json.dumps(messages_to_dict(preprocess_messages(state['messages'])), ensure_ascii=False))
         if state.get('replan_count', 0):
             recovery = Template(settings['replan_prompt']).substitute(
                 replan_count=state['replan_count'],
@@ -38,7 +39,8 @@ def build_plan_agent(config_path: str | Path = DEFAULT_CONFIG, **llm_options):
     def finish(state, plan):
         validate_plan_graph(plan)
         return {'natural_plan': state['output'], 'plan': plan.model_dump(),
-                'status': 'planned', 'error': ''}
+                'status': 'planned', 'error': '',
+                'messages': [plan_artifact(plan, attempt=state.get('replan_count', 0) + 1)]}
 
     def failure(state, reason):
         return {'natural_plan': state.get('output', ''), 'plan': {},

@@ -2,6 +2,7 @@
 import os
 from langchain_openai import ChatOpenAI
 from langchain_core.runnables.config import merge_configs
+from .thinking import thinking_body
 
 
 def no_stream_config(config=None):
@@ -16,5 +17,7 @@ def build_chat_model(options, timeout, *, chat_factory=None, structured=False):
         key = os.getenv('DECISION_API_KEY') or options.get('api_key') or os.getenv('QWEN_API_KEY') or 'local'
     if not endpoint or not model:
         raise ValueError('Chat LLM endpoint and model are required')
+    extra_body = thinking_body(thinking=options.get('thinking'),
+                               thinking_format=options.get('thinking_format'))
     return (chat_factory or ChatOpenAI)(base_url=endpoint, model=model, api_key=key,
-        timeout=timeout, max_retries=0, streaming=not structured, disable_streaming=structured)
+        timeout=timeout, max_retries=0, streaming=not structured, disable_streaming=structured, extra_body=extra_body)

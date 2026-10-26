@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1
+ARG GLAB_VERSION=latest
+FROM gitlab/glab:${GLAB_VERSION} AS gitlab_cli
 FROM node:22-bookworm-slim AS node
 FROM python:3.13-slim-bookworm AS cli
+COPY --from=gitlab_cli /usr/bin/glab /usr/local/bin/glab
+RUN glab --version
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \

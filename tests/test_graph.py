@@ -53,10 +53,15 @@ class GraphIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['status'], 'completed')
         names = [message.name for message in result['messages']]
         self.assertEqual(names.count('initialize'), 1)
-        self.assertEqual(names.count('plan'), 2)
+        self.assertEqual(names.count('plan'), 4)
+        artifacts = [m for m in result['messages'] if m.additional_kwargs.get('orchestrator_artifact', {}).get('type') == 'execution_plan']
+        self.assertEqual([m.additional_kwargs['orchestrator_artifact']['attempt'] for m in artifacts], [1, 2])
         self.assertEqual(names.count('execute'), 3)
         self.assertEqual(names.count('reviewer'), 3)
-        self.assertEqual(len(result['messages']), 16)
+        self.assertEqual(len(result['messages']), 20)
+        handoffs = [m for m in result['messages'] if m.name == 'plan_handoff']
+        self.assertEqual(len(handoffs), 2)
+        self.assertNotEqual(handoffs[0].id, handoffs[1].id)
         self.assertEqual(sum(m.id == 'team-progress' for m in result['messages']), 1)
         self.assertIn('2/2', next(m.content for m in result['messages'] if m.id == 'team-progress'))
         self.assertEqual(result['replan_count'], 1)
@@ -68,6 +73,8 @@ class GraphIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result['results']['a']['reused'])
         self.assertIn('b regression requires repair', plan_cli.call_args_list[1].args[0])
         self.assertIn('a approved', plan_cli.call_args_list[1].args[0])
+        self.assertNotIn('```mermaid', plan_cli.call_args_list[1].args[0])
+        self.assertNotIn('orchestrator_artifact', plan_cli.call_args_list[1].args[0])
         self.assertIn('preserve contracts', review_cli.call_args_list[0].args[0])
         self.assertEqual(result['execution_history'][0]['results']['b']['review']['assessment']['status'], 'fail')
 

@@ -14,6 +14,7 @@ from orchestrator.agents.reviewer import build_reviewer_agent
 from orchestrator.runtime.network import build_execution_graph, task_signature, message_delta
 from orchestrator.runtime.two_phase import CONFIG_ROOT, read_settings
 from orchestrator.runtime.status import team_progress
+from orchestrator.runtime.artifacts import plan_handoff_artifact
 from orchestrator.schemas import PlanGraph
 from orchestrator.state import WorkflowState as PlanState
 
@@ -36,6 +37,11 @@ def build_graph(config_path: str | Path = CONFIG_ROOT / 'plan.yaml', *,
     reviewer_options = {'config_path': reviewer_config_path} if reviewer_config_path else {}
     executor = build_execute_agent(**execute_options, **llm_options) if dispatch_execute else None
     reviewer = build_reviewer_agent(**reviewer_options, **llm_options) if dispatch_execute else None
+
+    def announce_plan(state: PlanState):
+        return {'messages': [plan_handoff_artifact(
+            attempt=state.get('replan_count', 0) + 1,
+            approved_count=len(state.get('approved_work', [])))]}
 
     def prepare_replan(state: PlanState):
         return {"replan_count": state["replan_count"] + 1, "messages": [team_progress("Team đang lập lại kế hoạch và giữ nguyên công việc đã được Reviewer duyệt.")]}
@@ -86,10 +92,12 @@ def build_graph(config_path: str | Path = CONFIG_ROOT / 'plan.yaml', *,
 
     workflow = StateGraph(PlanState)
     workflow.add_node('initialize', initializer)
+    workflow.add_node('announce_plan', announce_plan)
     workflow.add_node('plan', planner)
+    workflow.add_edge('announce_plan', 'plan')
     workflow.add_edge(START, 'initialize')
-    workflow.add_conditional_edges('initialize', lambda s: 'plan'
-        if s['status'] == 'ready_for_plan' else END, ['plan', END])
+    workflow.add_conditional_edges('initialize', lambda s: 'announce_plan'
+        if s['status'] == 'ready_for_plan' else END, ['announce_plan', END])
     if dispatch_execute:
         workflow.add_node('announce_execution', announce_execution)
         workflow.add_node('execute_network', run_network)
@@ -100,10 +108,10 @@ def build_graph(config_path: str | Path = CONFIG_ROOT / 'plan.yaml', *,
         workflow.add_edge('execute_network', 'summarize_execution')
         workflow.add_conditional_edges('summarize_execution', lambda s: 'prepare_replan'
             if s['status'] == 'failed' and s['replan_count'] < max_replans else END, ['prepare_replan', END])
-        workflow.add_edge('prepare_replan', 'plan')
+        workflow.add_edge('prepare_replan', 'announce_plan')
     else:
         workflow.add_edge('plan', END)
-    return workflow.compile().with_config(recursion_limit=max(25, 6 * (max_replans + 1) + 5))
+    return workflow.compile().with_config(recursion_limit=max(25, 7 * (max_replans + 1) + 5))
 
 
 graph = build_graph()

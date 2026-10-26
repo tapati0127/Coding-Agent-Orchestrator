@@ -56,7 +56,7 @@ Execute và Reviewer đều trả báo cáo tự nhiên ở `output` và `assess
 Assessment pass ánh xạ status completed; fail ánh xạ failed. CLI có lỗi,
 blockers hoặc structured output lỗi luôn fail. CLI exit 0 không tự đồng nghĩa
 pass. Reviewer CLI đọc code/chạy kiểm tra thực tế; model structured chỉ đánh giá
-báo cáo đó. Reviewer nhận toàn bộ messages, task, findings và kết quả Execute.
+báo cáo đó. Reviewer nhận messages đã lọc artifact hiển thị, task, findings và kết quả Execute.
 
 Root trả `results` của mạng gần nhất; từng node có output/assessment Execute và
 `review` chứa output/assessment Reviewer. `approved_work` chứa task đã review
@@ -102,7 +102,9 @@ chuyển Plan. Vòng replan kỹ thuật quay thẳng về Plan, không hỏi l�
 Mọi lần tạo nội dung tự nhiên (Initialize/Plan/Execute/Reviewer) thêm AIMessage
 mới, name tương ứng role. Reducer add_messages giữ lịch sử; graph động gom các
 message mới của Execute/Reviewer về root, không nhân bản lịch sử hay approval
-được tái sử dụng. Bước structured chỉ cập nhật field nghiệp vụ, không trả message.
+được tái sử dụng. Bước structured cập nhật field nghiệp vụ; riêng Plan trả thêm
+AIMessage artifact sau khi DAG được validate. Artifact dựng bằng code, không
+phát sinh thêm lượt gọi LLM.
 Tất cả node và model invocation structured có tag no_stream; ChatOpenAI của
 bước này dùng streaming=False, disable_streaming=True. Khi dùng stream_mode
 messages, UI lọc event metadata tags chứa no_stream vì đây là tag dành cho UI,
@@ -121,14 +123,18 @@ hình endpoint nội bộ nêu trên. Initialize không đọc code hoặc chạ
 
 Graph role coding được chia thành:
 `prepare → announce_start → coding → structure → announce_result`.
-announce_start trả AIMessage trước khi CLI chạy; announce_result đọc status và
-assessment, trả AIMessage pass/fail sau khi structured output hoàn tất. Nội dung
+announce_start trả AIMessage trước khi CLI chạy, nêu tên CLI và liên kết
+`/terminals`. Node coding trả báo cáo tự nhiên cùng AIMessage thông báo CLI đã
+kết thúc và đang xử lý structured output; lỗi/timeout cũng có thông báo tương ứng.
+announce_result đọc status và assessment, trả AIMessage pass/fail sau khi
+structured output hoàn tất. Nội dung
 báo cáo CLI vẫn là message riêng. Initialize giữ hai bước hội thoại và quyết định.
 
-Root chạy `plan → announce_execution → execute_network → summarize_execution`.
+Root chạy `initialize → announce_plan → plan → announce_execution →
+execute_network → summarize_execution`. Nếu cần hỏi làm rõ thì dừng ngay sau Initialize.
 Summary nêu số task được duyệt, task fail/skipped và có replan tiếp hay không;
 không gọi thêm LLM, không có timer. prepare_replan cũng trả thông báo trước khi
-quay về Plan. ID team-progress dùng chung cho summary toàn team; từng role/task
+quay qua announce_plan rồi vào Plan. ID team-progress dùng chung cho summary toàn team; từng role/task
 có ID progress:<role>:<task_id>. Reducer thay nội dung message cũ theo ID.
 
 Để thấy cập nhật trước khi toàn bộ workflow xong, dùng stream_mode updates và
@@ -157,18 +163,19 @@ mọi tool. Plan/Reviewer chỉ đọc vẫn do prompt hướng dẫn.
 
 LangGraph dev ở host, riêng Plan/Execute/Reviewer CLI nằm trong Docker image.
 CODING_CLI_RUNTIME=docker chọn runner; CODING_CLI_IMAGE chọn image, mặc định
-coding-agent-cli:local. local vẫn hỗ trợ cho kiểm thử/môi trường cũ.
-Dockerfile cài cả @qwen-code/qwen-code và opencode-ai cùng Node 22/Python 3.13.
+coding-agent-cli:local. local chạy CLI trực tiếp và là chế độ mặc định của Compose.
+Dockerfile cài @qwen-code/qwen-code, opencode-ai và glab cùng Node 22/Python 3.13.
+Build image CLI riêng cần `docker build --target cli ...`; target cuối mặc định là team.
 Mỗi lần gọi docker run --rm --init có cidfile riêng; timeout/exception dọn đúng
 container đó. Workspace và scratch mount cùng đường dẫn host để liên kết project/
 vẫn hợp lệ. CA bundle mount readonly; env SSL_CERT_FILE/NODE_EXTRA_CA_CERTS trỏ
 đúng path trong container. API key forward bằng tên env, không ghi vào image.
 Trong coding container dùng python của image, không dùng .venv host.
 
-## Compose: cả ba công cụ trong một container
+## Compose: LangGraph và các CLI trong một container
 
 `docker compose up --build -d` dùng target team trong Dockerfile. Service duy nhất
-team chứa LangGraph dev và hai CLI; port host 2026 nối port container 2026.
+team chứa LangGraph dev, Qwen, OpenCode và glab; port host 2026 nối port container 2026.
 CODING_CLI_RUNTIME=local nghĩa là CLI chạy trực tiếp trong container này. Compose
 override giá trị runtime từ .env, không khởi tạo container con và không mount
 Docker socket. Env LLM/API keys lấy từ .env. Config langgraph.docker.json không
@@ -179,3 +186,86 @@ Source mount /app, repository mục tiêu mount /workspace, CA mount readonly �
 PROJECT_WORKSPACE mặc định ., có thể đổi repository host. Volume team-state giữ
 /app/.langgraph_api và tách khỏi persistence của server host cũ. Build secret
 ca_bundle chỉ dùng khi npm/pip cài package, không ghi CA/key vào image.
+
+## Thinking global và override từng role
+
+LLM_THINKING=false và LLM_THINKING_FORMAT=enable_thinking là mặc định chung.
+Ưu tiên: YAML thinking/thinking_format không null → factory options → .env.
+ChatOpenAI được truyền extra_body trực tiếp, không phụ thuộc hostname endpoint.
+Qwen dùng model.generationConfig.extra_body trong .qwen/settings.json tạm;
+OpenCode dùng options của model internal. File cấu hình Qwen được tự dọn.
+
+Format enable_thinking gửi {"enable_thinking": false}; chat_template_kwargs gửi
+{"chat_template_kwargs": {"enable_thinking": false}}. Giá trị true ghi đè để bật.
+YAML thinking phải là boolean thật hoặc null. Server/model cần hỗ trợ tham số.
+Không thay đổi no_stream, streaming tự nhiên hoặc pass/fail assessment.
+
+
+## Artifact chỉ đọc và preprocessing messages
+
+Node `announce_plan` chạy trước khi gọi Plan, cả lần đầu và mỗi lần replan.
+Node trả AIMessage có name `plan_handoff`, ID `plan-handoff:<attempt>:<uuid>`,
+nội dung Markdown về các bước tiếp theo, số công việc đã duyệt khi replan và
+liên kết `/terminals`. UUID giúp các lượt chạy trên cùng thread không ghi đè nhau.
+Không tạo artifact bàn giao khi Initialize chưa đủ thông tin hoặc bị lỗi.
+
+Sau khi structured PlanGraph được validate thành công, `agents/plan.py:finish()`
+gọi `runtime/artifacts.py:plan_artifact()`. AIMessage có name `plan`, nội dung
+Mermaid `flowchart TD` và bảng nhiệm vụ/phụ thuộc/tiêu chí hoàn thành. Sơ đồ nối
+START với các root, các edge đúng DAG và các leaf với END; mỗi node được chạy
+qua Execute rồi Reviewer. Đây là kế hoạch, không phải trạng thái thực thi từng
+node. Client không render Mermaid vẫn đọc được bảng Markdown.
+
+Cả hai loại message có metadata `additional_kwargs.orchestrator_artifact`:
+`type` là `plan_handoff` hoặc `execution_plan`, `mime_type=text/markdown`,
+`version=1`, `read_only=true` và `attempt` bắt đầu từ 1. Artifact không được
+đưa vào schema PlanGraph hoặc yêu cầu LLM tự vẽ sơ đồ.
+
+`runtime/artifacts.py:preprocess_messages(messages)` trả một list mới, lọc hai
+loại artifact trên và giữ nguyên các message khác. Initialize dùng hàm này cho
+cả hội thoại lẫn structured payload; Plan dùng trước khi serialize prompt;
+network dùng trước khi gọi Execute/Reviewer; Reviewer cũng lọc khi enrich task.
+Lịch sử state/checkpoint và `state.plan` không bị xóa. Agent mới nhận messages
+cần gọi hàm này tại biên tạo prompt/bàn giao để tránh gửi nội dung hiển thị vào LLM.
+
+## Terminal Monitor và log CLI
+
+Cả `langgraph.json` và `langgraph.docker.json` dùng
+`http.app=./orchestrator/terminal_monitor.py:app`. Starlette app cung cấp:
+
+| Endpoint GET | Nội dung |
+| --- | --- |
+| `/terminals`, `/terminals/` | Giao diện chỉ đọc, tự cập nhật log và hỗ trợ ANSI cơ bản |
+| `/terminals/api/files` | Danh sách file `.log`/`.txt` trong thư mục log |
+| `/terminals/api/read` | Đọc theo `name`, byte `offset` và `file_id`; dữ liệu base64 |
+
+Compose dùng `http://localhost:2026/terminals`; host dev mặc định dùng
+`http://localhost:2024/terminals`. Không chạy HTTP server riêng hoặc mở thêm cổng.
+Viewer không bổ sung cơ chế đăng nhập riêng.
+
+Đặt `CLI_LOG_DIR=.local/cli-logs` trong `.env` để bật `run_logged()` cho local
+và Docker runner; để trống/bỏ biến để giữ runner capture output thông thường.
+Đường dẫn tương đối được resolve từ cwd của tiến trình LangGraph. Log mỗi lần
+chạy có timestamp UTC và UUID, chứa stdout/stderr được ghi trực tiếp; kết quả
+trả về agent vẫn tách stdout/stderr như trước. Log che giá trị các biến môi trường
+có tên chứa TOKEN, API_KEY, PASSWORD hoặc SECRET, kể cả chuỗi bị chia qua các chunk;
+đây không phải bộ phát hiện mọi dữ liệu nhạy cảm trong nội dung CLI.
+
+Log nằm ngoài scratch workdir, có quyền file 0600 và không tự xóa. Với Compose,
+đường dẫn mặc định được giữ trên host qua bind mount `/app`; nếu đổi sang thư mục
+khác trong container thì cần mount phù hợp để giữ log khi tạo lại container.
+Reader từ chối path traversal/symlink, giới hạn chunk 64 KiB và lấy phần cuối
+128 KiB khi mở log lớn. `file_id`/kích thước hỗ trợ reset khi file đổi hoặc bị cắt.
+
+## GitLab CLI trong image
+
+Dockerfile copy binary glab từ stage `gitlab/glab:${GLAB_VERSION}`; mặc định tag
+latest, có thể pin bằng build arg GLAB_VERSION hoặc biến cùng tên của Compose.
+Image kiểm tra `glab --version` khi build. Điền GITLAB_TOKEN và GITLAB_HOST
+(nếu dùng GitLab riêng) vào `.env`; Compose nạp trực tiếp vào container team,
+không cần chạy glab auth login hoặc ghi token vào Dockerfile/build args.
+
+Sau khi đổi image: `docker compose up -d --build team`. Kiểm tra:
+`docker compose exec team glab --version`. Runner Docker CLI riêng chỉ forward
+các biến trong `FORWARDED_ENV`; cần bổ sung danh sách đó nếu muốn truyền thêm
+biến GitLab vào container con. Không commit `.env` hoặc file log chứa dữ liệu thật.

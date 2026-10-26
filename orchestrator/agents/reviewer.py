@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from langchain_core.messages import messages_to_dict
 from langchain_openai import ChatOpenAI
+from orchestrator.runtime.artifacts import preprocess_messages
 from orchestrator.runtime.cli import run_llm_cli
 from orchestrator.runtime.two_phase import CONFIG_ROOT
 from orchestrator.state import TaskState as ReviewerState
@@ -21,7 +22,7 @@ def build_reviewer_agent(config_path: str | Path = DEFAULT_CONFIG, **llm_options
         task = dict(state['task'])
         task['context'] = json.dumps({
             'task_context': task.get('context', ''), 'related_files': task.get('related_files', []),
-            'messages': messages_to_dict(state['messages']), 'execution_result': result,
+            'messages': messages_to_dict(preprocess_messages(state['messages'])), 'execution_result': result,
         }, ensure_ascii=False)
         return task
 

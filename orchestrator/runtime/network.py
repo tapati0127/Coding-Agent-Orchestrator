@@ -5,6 +5,7 @@ from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
+from .artifacts import preprocess_messages
 from orchestrator.schemas import ExecuteNode, PlanGraph, validate_plan_graph
 
 def message_delta(current, previous):
@@ -45,7 +46,7 @@ def build_task_graph(executor, reviewer=None):
         produced = []
         try:
             result = await executor.ainvoke({'workspace': state['workspace'], 'task': state['task'],
-                'messages': state.get('messages', [])}, config=config)
+                'messages': preprocess_messages(state.get('messages', []))}, config=config)
             entry = {key: result.get(key, '') for key in fields}
             produced = message_delta(result.get('messages', []), state.get('messages', []))
         except Exception:
@@ -56,7 +57,7 @@ def build_task_graph(executor, reviewer=None):
         produced = []
         try:
             result = await reviewer.ainvoke({'workspace': state['workspace'], 'task': state['task'],
-                'messages': state.get('messages', []), 'execution_result': state['execution_result']}, config=config)
+                'messages': preprocess_messages(state.get('messages', [])), 'execution_result': state['execution_result']}, config=config)
             entry = {key: result.get(key, '') for key in fields}
             produced = message_delta(result.get('messages', []), state.get('messages', []))
         except Exception:

@@ -63,6 +63,17 @@ class PlanAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(payload)['natural_plan'], natural)
         self.assertIn('API implemented', execute.call_args_list[1].args[0])
         self.assertIn('verified findings', execute.call_args_list[0].args[0])
+        from orchestrator.runtime.artifacts import ARTIFACT_KEY
+        artifacts = [m for m in result['messages'] if m.additional_kwargs.get(ARTIFACT_KEY, {}).get('type') == 'execution_plan']
+        self.assertEqual(len(artifacts), 1)
+        self.assertNotIn('orchestrator_artifact', cli.call_args.args[0])
+        self.assertNotIn('Bàn giao cho AI Plan', cli.call_args.args[0])
+        self.assertIn('```mermaid', artifacts[0].content)
+        for call in self.reviewer.ainvoke.call_args_list:
+            self.assertTrue(all(ARTIFACT_KEY not in m.additional_kwargs for m in call.args[0]['messages']))
+        for call in execute.call_args_list:
+            self.assertNotIn('```mermaid', call.args[0])
+
 
     async def test_parallel_roots_and_unequal_branch_join_once(self):
         started, completed, calls = set(), set(), []

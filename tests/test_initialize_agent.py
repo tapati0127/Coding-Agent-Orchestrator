@@ -62,7 +62,7 @@ class InitializeAgentTests(unittest.IsolatedAsyncioTestCase):
                 chat.return_value.with_structured_output.return_value.ainvoke = AsyncMock(return_value=plan(['health']))
                 result = await build_graph(dispatch_execute=False).ainvoke({'messages': [*first['messages'], ('user', 'GET /health returns 200 JSON')]})
         self.assertEqual(result['status'], 'planned')
-        self.assertEqual([m.name for m in result['messages'] if isinstance(m, AIMessage) and m.name != 'progress'], ['initialize', 'initialize', 'plan'])
+        self.assertEqual([m.name for m in result['messages'] if isinstance(m, AIMessage) and m.name != 'progress'], ['initialize', 'initialize', 'plan_handoff', 'plan', 'plan'])
         self.assertIn('GET /health returns 200 JSON', cli.call_args.args[0])
         payload = json.loads(self.structure.ainvoke.call_args.args[0][1].content)
         self.assertEqual(payload['messages'][-1]['data']['content'], 'I will hand the health endpoint task to Plan')

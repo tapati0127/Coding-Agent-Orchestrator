@@ -6,7 +6,9 @@ from langchain_core.messages import AIMessage, SystemMessage, messages_to_dict
 from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langchain_openai import ChatOpenAI
 
+from orchestrator.runtime.artifacts import preprocess_messages
 from orchestrator.runtime.chat import build_chat_model
+from orchestrator.runtime.thinking import thinking_options
 from orchestrator.runtime.two_phase import CONFIG_ROOT, build_two_phase_graph, read_settings, workspace_path
 from orchestrator.schemas import ClarificationDecision
 from orchestrator.state import WorkflowState
@@ -16,6 +18,7 @@ DEFAULT_CONFIG = CONFIG_ROOT / 'initialize.yaml'
 
 def build_initialize_agent(config_path: str | Path = DEFAULT_CONFIG, **llm_options):
     settings = read_settings(config_path)
+    llm_options = thinking_options(settings, llm_options)
     timeout = settings.get('timeout', 120)
 
     def prepare(state):
@@ -30,7 +33,7 @@ def build_initialize_agent(config_path: str | Path = DEFAULT_CONFIG, **llm_optio
         return build_chat_model(llm_options, timeout, chat_factory=ChatOpenAI)
 
     def inputs(state):
-        return [SystemMessage(content=settings['prompt']), *state['messages']]
+        return [SystemMessage(content=settings['prompt']), *preprocess_messages(state['messages'])]
 
     def reply_update(reply):
         if not isinstance(reply, AIMessage) or not reply.content:
@@ -54,7 +57,7 @@ def build_initialize_agent(config_path: str | Path = DEFAULT_CONFIG, **llm_optio
                     'status': 'failed', 'error': 'Initialize conversation failed'}
 
     def payload(state):
-        return {'messages': messages_to_dict(state['messages'])}
+        return {'messages': messages_to_dict(preprocess_messages(state['messages']))}
 
     def finish(state, decision):
         ready = decision.ready_for_plan and not decision.missing_information

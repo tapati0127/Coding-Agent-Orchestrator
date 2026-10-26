@@ -31,9 +31,15 @@ class MilestoneMessageTests(unittest.IsolatedAsyncioTestCase):
                         messages = add_messages(messages, fields.get('messages', []))
                         if node == 'announce_start':
                             self.assertIn('bắt đầu', fields['messages'][0].content)
+                            self.assertIn('(/terminals)', fields['messages'][0].content)
                             gate.set()
         names = [next(iter(update)) for update in updates]
         self.assertLess(names.index('announce_start'), names.index('coding'))
+        self.assertLess(names.index('coding'), names.index('structure'))
+        finished = next(u['coding'] for u in updates if 'coding' in u)['messages'][-1]
+        self.assertIsInstance(finished, AIMessage)
+        self.assertIn('đã chạy xong', finished.content)
+        self.assertIn('(/terminals)', finished.content)
         self.assertLess(names.index('structure'), names.index('announce_result'))
         self.assertNotIn('messages', next(u['structure'] for u in updates if 'structure' in u))
         status_messages = [m for m in messages if m.id == 'progress:execute:api']

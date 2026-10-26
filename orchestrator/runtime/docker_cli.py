@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 import subprocess
 
+from .cli_logs import run_logged
+
 FORWARDED_ENV = (
     'OPENAI_BASE_URL', 'OPENAI_MODEL', 'OPENAI_API_KEY', 'INTERNAL_LLM_API_KEY',
     'OPENCODE_CONFIG_CONTENT', 'OPENCODE_PERMISSION', 'SSL_CERT_FILE',
@@ -31,7 +33,7 @@ def run_in_docker(command, *, docker, workdir, project, env, timeout):
             docker_command += ['--env', key]
     docker_command += [os.getenv('CODING_CLI_IMAGE', 'coding-agent-cli:local'), *command]
     try:
-        return subprocess.run(docker_command, env=env, stdin=subprocess.DEVNULL,
+        return run_logged(docker_command, env=env, stdin=subprocess.DEVNULL,
             capture_output=True, text=True, encoding='utf-8', errors='replace',
             timeout=timeout, check=False)
     finally:

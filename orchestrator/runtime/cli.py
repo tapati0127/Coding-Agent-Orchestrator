@@ -5,11 +5,14 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+
+from .cli_logs import run_logged
 from typing import Literal
 from urllib.parse import urlsplit
 
 from .workdir import coding_workdir
 from .docker_cli import run_in_docker
+from .thinking import thinking_body
 
 
 def run_llm_cli(
@@ -21,6 +24,8 @@ def run_llm_cli(
     api_key: str | None = None,
     cwd: str | Path | None = None,
     timeout: float = 1800,
+    thinking: bool | None = None,
+    thinking_format: str | None = None,
 ) -> str:
     """Return CLI stdout; raise on missing config, executable, failure or timeout.
 
@@ -55,6 +60,7 @@ def run_llm_cli(
     if executable is None:
         raise FileNotFoundError(f"{cli} CLI is not installed or is missing from PATH")
 
+    request_thinking = thinking_body(thinking=thinking, thinking_format=thinking_format)
     env = os.environ.copy()
     # Keep credentials out of argv, logs, and persistent configuration files.
     env["INTERNAL_LLM_API_KEY"] = api_key or "local"
@@ -79,7 +85,7 @@ def run_llm_cli(
                         "baseURL": base_url,
                         "apiKey": "{env:INTERNAL_LLM_API_KEY}",
                     },
-                    "models": {model: {"name": model}},
+                    "models": {model: {"name": model, "options": request_thinking}},
                 },
             },
         })
@@ -87,6 +93,12 @@ def run_llm_cli(
         command = [executable, "run", "--model", f"internal/{model}", "--", prompt]
 
     with coding_workdir(cwd, cli=cli) as (workdir, project):
+        if cli == 'qwen':
+            settings_dir = workdir / '.qwen'
+            settings_dir.mkdir()
+            (settings_dir / 'settings.json').write_text(json.dumps({
+                'model': {'generationConfig': {'extra_body': request_thinking}},
+            }), encoding='utf-8')
         invocation_prompt = (
             f"Thư mục chạy riêng: {workdir}. Repository thật: {project}.\n"
             "project/ là liên kết tới repository; đọc/sửa code ở repository thật, "
@@ -105,7 +117,7 @@ def run_llm_cli(
             result = run_in_docker(command, docker=docker, workdir=workdir, project=project,
                                    env=env, timeout=timeout)
         else:
-            result = subprocess.run(
+            result = run_logged(
                 command,
                 cwd=workdir,
                 env=env,

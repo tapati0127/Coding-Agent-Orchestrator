@@ -1,7 +1,12 @@
 {
-  "dependencies": ["."],
+  "dependencies": [
+    "."
+  ],
   "graphs": {
     "team": "./graph.py:graph"
   },
-  "env": ".env"
+  "env": ".env",
+  "http": {
+    "app": "./orchestrator/terminal_monitor.py:app"
+  }
 }
