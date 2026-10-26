@@ -102,13 +102,18 @@ flowchart TD
     I -- đủ rõ --> H[announce_plan: artifact bàn giao]
     H --> P[Plan: CLI → structured DAG + artifact]
     I -- còn thiếu --> C([END: needs_clarification, trả câu hỏi])
-    P --> E[Build mạng task từ nodes và edges]
+    P --> U[interrupt: chờ người dùng duyệt]
+    U --> V[Structured: short_explanation, ready_for_execute]
+    V -- cần sửa --> H
+    V -- đồng ý --> E[Build mạng task từ nodes và edges]
     E --> X[Execute: CLI → structured pass/fail]
-    X -- pass --> R[Reviewer: CLI → structured pass/fail]
+    X -- pass --> K{Đến mốc review?}
+    K -- chưa, chuỗi nối tiếp --> X
+    K -- điểm nối / review sớm / cuối --> R[Reviewer nhóm: CLI → structured pass/fail]
     X -- fail --> F[Kết quả mạng thất bại]
     R -- fail --> F
     R -- pass --> M[Merge local vào nhánh chính]
-    M -- thành công --> A[Ghi approved_work; cho task phụ thuộc chạy]
+    M -- thành công --> A[Ghi approved_work cho nhóm; cho task sau mốc chạy]
     M -- lỗi --> F
     A --> D{Mọi task đã hoàn tất?}
     D -- chưa --> X
@@ -118,13 +123,48 @@ flowchart TD
     B -- hết --> Q([END: failed])
 ```
 
-Task độc lập chạy song song trên các Git worktree riêng. Reviewer kiểm tra bản
-merge thử với nhánh chính mới nhất; review/merge được tuần tự hóa. Join chờ
-mọi predecessors đã merge; Execute hoặc
-Reviewer fail khiến descendants skipped. Các nhánh độc lập hoàn tất trước khi
-replan. Plan nhận lịch sử và approved_work để giữ phần đã duyệt. Runtime tái sử
-dụng task có cùng yêu cầu/criteria/files/constraints, kể cả đổi ID. Mặc định có
-hai lần replan sau lần đầu (`config/plan.yaml: max_replans`).
+Task độc lập chạy song song trên các Git worktree riêng. Chuỗi nối tiếp chỉ
+review ở cuối; trước điểm nối nhiều nhánh, runtime đợi các nhánh cần thiết rồi
+review chung. Phần còn lại được review cuối kế hoạch. `review_after: true`
+trong node Plan đặt mốc review sớm cho task rủi ro cao hoặc đổi hợp đồng chung.
+Mỗi task thuộc một nhóm review; shared ancestor được gán cho một mốc để tránh
+review/merge trùng. Mốc khác cần ancestor đó sẽ chờ nhóm sở hữu được duyệt.
+
+Execute pass tạo trạng thái tạm `executed`; task sau trong chuỗi kế thừa commit
+của dependency trên worktree riêng, không cần merge nhánh đích ngay. Reviewer
+kiểm tra bản tích hợp của cả nhóm với nhánh đích mới nhất. Chỉ nhóm được duyệt
+mới merge và chuyển các task sang `completed`. Review fail làm cả nhóm chưa
+hoàn tất; task phụ thuộc bị skip. Các nhóm đã duyệt vẫn giữ trong approved_work.
+Scheduler chỉ chờ dependency liên quan, không chờ nhánh độc lập chậm tại mốc nối.
+Review/merge Git được tuần tự hóa. Mặc định có hai lượt technical replan sau
+lần đầu (`config/plan.yaml: max_replans`).
+
+Plan hiển thị thông báo tiến độ bằng code, giữ báo cáo CLI trong state/log và
+chỉ phát một thông báo kết quả kèm artifact DAG đã validate. Sau đó graph dừng
+ở `interrupt()` chờ người dùng duyệt. Phản hồi được đánh giá bằng
+`short_explanation`, `ready_for_execute`: false quay lại Plan cùng góp ý và kế
+hoạch trước; true mới chạy Execute. Mỗi kế hoạch mới, kể cả replan sau lỗi thực
+thi, đều cần duyệt lại. Lượt sửa theo góp ý không tiêu hao `max_replans`.
+
+Chạy Python trực tiếp cần checkpointer và cùng `thread_id` để resume:
+
+```python
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
+
+workflow = build_graph(checkpointer=InMemorySaver())
+config = {"configurable": {"thread_id": "my-task"}}
+result = await workflow.ainvoke({"messages": [("user", "Thêm API health")]}, config)
+# Khi result có __interrupt__, hiển thị câu hỏi và kế hoạch rồi chờ người dùng.
+result = await workflow.ainvoke(Command(resume="Đồng ý thực thi"), config)
+# Nếu góp ý sửa, result lại có __interrupt__ để duyệt kế hoạch mới.
+```
+
+LangGraph Server quản lý checkpoint/thread cho graph mặc định. Caller/UI cần
+resume interrupt hiện tại thay vì gửi một lượt input mới từ START. Với
+`dispatch_execute=False`, graph chỉ tạo kế hoạch và kết thúc, không hỏi duyệt.
+Prompt đánh giá ở `config/plan_approval.yaml`. Plan có một lượt CLI và một lần
+structured DAG; mỗi phản hồi duyệt thêm một lần structured approval.
 
 Kiểm tra offline:
 
@@ -135,7 +175,9 @@ Kiểm tra offline:
 Xem [chi tiết cấu hình và giới hạn](docs/plan-execute.md).
 
 Initialize hỏi làm rõ hoặc xác nhận yêu cầu trong `messages`. Structured output
-quyết định `ready_for_plan`; nếu chưa rõ thì dừng với `needs_clarification`.
+gồm `short_explanation` rồi `ready_for_plan`; nếu chưa rõ thì dừng với
+`needs_clarification`. Câu trả lời Initialize hiển thị trực tiếp, không gọi
+model viết lại; mỗi lượt bình thường chỉ có hai lần gọi LLM.
 Caller nối câu trả lời của user vào messages nhận được rồi invoke lại (hoặc
 sử dụng lịch sử thread của môi trường LangGraph).
 
@@ -222,7 +264,7 @@ Mặc định tắt cho ChatOpenAI và cả hai coding CLI:
 
 ```dotenv
 LLM_THINKING=false
-LLM_THINKING_FORMAT=enable_thinking
+LLM_THINKING_FORMAT=chat_template_kwargs
 ```
 
 Từng YAML có thể ghi đè:
@@ -232,10 +274,10 @@ thinking: true          # true/false; null kế thừa .env
 thinking_format: null  # kế thừa global
 ```
 
-ChatOpenAI nhận trực tiếp `extra_body={"enable_thinking": false}`; Qwen nhận
-extra_body trong generationConfig; OpenCode nhận options của model. Không dò
-hostname hoặc xử lý riêng OpenRouter. Nếu server yêu cầu tham số lồng nhau,
-chọn thinking_format: chat_template_kwargs. Server/model cần hỗ trợ cờ tương ứng.
+ChatOpenAI nhận `extra_body={"chat_template_kwargs": {"enable_thinking": false}}`;
+Qwen nhận extra_body trong generationConfig; OpenCode nhận options của model.
+Server yêu cầu cờ ở cấp ngoài có thể chọn `thinking_format: enable_thinking`.
+Server/model cần hỗ trợ cờ tương ứng.
 
 Thay .env cần tạo lại container: `docker compose up -d --force-recreate`.
 
@@ -364,8 +406,16 @@ theo, không cần cài global; source phải có trong container hoặc mount `
 
 ## Phản hồi dễ hiểu theo người đang hội thoại
 
-Mọi AIMessage gửi người dùng, ngoại trừ artifact-only tất định, qua thêm một lần
-ChatOpenAI viết lại theo lịch sử hội thoại và trạng thái thực tế. Prompt và giới
+Initialize, Plan, Execute và Reviewer không dùng LLM viết lại thông báo.
+Execute/Reviewer hiển thị tiến độ bằng code và trạng thái cùng explanation từ
+assessment. Báo cáo CLI giữ trong state/log, không đưa nguyên báo cáo vào chat.
+Mỗi role Execute/Reviewer có một lượt CLI và một lần ChatOpenAI structured
+pass/fail. Execute pass chỉ cho phép chuyển Reviewer; Reviewer pass chưa xác
+nhận đã merge. Thông báo Git chỉ được phát sau kết quả tích hợp thực tế.
+Các graph task/network và execute_network không viết lại thông báo con.
+Thông báo team bắt đầu thực thi cũng được tạo bằng code. Thông báo tổng kết
+và chuẩn bị technical replan của team vẫn dùng lớp diễn đạt ChatOpenAI.
+Prompt và giới
 hạn nằm ở `config/response.yaml`; dùng DECISION_* và fallback QWEN_* như các
 bước ChatOpenAI khác. Model chọn ngôn ngữ/mức độ kỹ thuật theo hội thoại, giải thích
 lỗi/blocker và việc cần tiếp theo; không thay quyết định thực thi/review/merge.

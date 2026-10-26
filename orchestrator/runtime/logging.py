@@ -130,7 +130,7 @@ def outcome(update):
     return result
 
 
-def logged_node(agent, name, action, *, task_id=None, response_options=None):
+def logged_node(agent, name, action, *, task_id=None, response_options=None, rewrite_responses=True):
     """Wrap a node preserving sync/async invocation, config, and callbacks."""
     runnable = action if isinstance(action, Runnable) else RunnableLambda(action)
 
@@ -158,7 +158,8 @@ def logged_node(agent, name, action, *, task_id=None, response_options=None):
         responses = prepare_response_module()
         with responses.response_scope(response_options), scope(state, config) as summary:
             update = runnable.invoke(state, config=config)
-            update = responses.rewrite_update(state, update, config, agent=agent, node=name)
+            if rewrite_responses:
+                update = responses.rewrite_update(state, update, config, agent=agent, node=name)
             summary.update(outcome(update))
             return update
 
@@ -166,7 +167,8 @@ def logged_node(agent, name, action, *, task_id=None, response_options=None):
         responses = await asyncio.to_thread(prepare_response_module)
         with responses.response_scope(response_options), scope(state, config) as summary:
             update = await runnable.ainvoke(state, config=config)
-            update = await responses.arewrite_update(state, update, config, agent=agent, node=name)
+            if rewrite_responses:
+                update = await responses.arewrite_update(state, update, config, agent=agent, node=name)
             summary.update(outcome(update))
             return update
 

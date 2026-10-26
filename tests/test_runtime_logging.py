@@ -112,7 +112,7 @@ class RuntimeLoggingTests(unittest.IsolatedAsyncioTestCase):
                 chat.side_effect = lambda **kwargs: (os.getcwd(), instance)[1]
                 instance.ainvoke = AsyncMock(return_value=AIMessage(content='Which endpoint?'))
                 instance.with_structured_output.return_value.ainvoke = AsyncMock(return_value=ClarificationDecision(
-                    ready_for_plan=False, summary='Need endpoint', missing_information=['Endpoint'], explanation='Clarify'))
+                    short_explanation='Need endpoint', ready_for_plan=False))
                 workflow = await asyncio.to_thread(build_initialize_agent, base_url='http://internal/v1', model='test')
                 with blockbuster_ctx(scanned_modules=['orchestrator']):
                     result = await workflow.ainvoke({'workspace':root, 'messages':[('user','Add API')]})

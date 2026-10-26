@@ -50,7 +50,7 @@ class GitTaskTests(unittest.IsolatedAsyncioTestCase):
             {'workspace':str(self.repo), 'messages':[], 'results':{}})
         return result, reviewer
 
-    async def test_parallel_private_checkouts_serial_review_and_dependency_sees_merged_code(self):
+    async def test_parallel_group_review_and_join_sees_merged_code(self):
         arrived = set()
         ready = asyncio.Event()
         execution_paths = []
@@ -81,18 +81,65 @@ class GitTaskTests(unittest.IsolatedAsyncioTestCase):
             path = Path(state['workspace'])
             self.assertNotIn(path, execution_paths)
             reviewed_files.append({p.name for p in path.glob('*.txt')})
-            self.assertTrue((path / f"{state['task']['task_id']}.txt").exists())
+            for key in state['execution_result']['task_results']:
+                self.assertTrue((path / f'{key}.txt').exists())
             return passed()
         result, _ = await self.run_plan(make_plan(('a','b','join'), [('a','join'),('b','join')]), execute, review)
         self.assertTrue(all(r['status'] == 'completed' for r in result['results'].values()))
         self.assertEqual(len(set(execution_paths)), 3)
-        self.assertTrue({'a.txt','b.txt'} <= reviewed_files[1])
+        self.assertEqual(len(reviewed_files), 2)
+        self.assertTrue({'a.txt','b.txt'} <= reviewed_files[0])
         self.assertTrue((self.repo / 'join.txt').exists())
         self.assertFalse(git(self.repo, 'status', '--porcelain').stdout.strip())
         self.assertTrue(all(not p.exists() for p in execution_paths))
         for entry in result['results'].values():
             self.assertEqual(entry['integration']['status'], 'merged')
             git(self.repo, 'merge-base', '--is-ancestor', entry['integration']['merged_commit'], 'main')
+
+    async def test_chain_inherits_unreviewed_commits_and_merges_only_after_final_review(self):
+        seen = []
+        async def execute(state, config=None):
+            key = state['task']['task_id']
+            path = Path(state['workspace'])
+            seen.append(path)
+            self.assertEqual(git(self.repo, 'rev-parse', 'HEAD').stdout.strip(), self.initial)
+            self.assertFalse((self.repo / 'a.txt').exists())
+            if key == 'b':
+                self.assertEqual((path / 'a.txt').read_text(), 'a')
+            (path / f'{key}.txt').write_text(key)
+            return passed()
+        async def review(state, config=None):
+            self.assertEqual(set(state['execution_result']['task_results']), {'a', 'b'})
+            self.assertEqual(git(self.repo, 'rev-parse', 'HEAD').stdout.strip(), self.initial)
+            for key in ('a', 'b'):
+                self.assertTrue((Path(state['workspace']) / f'{key}.txt').exists())
+            return passed()
+        result, reviewer = await self.run_plan(make_plan(('a', 'b'), [('a', 'b')]), execute, review)
+        reviewer.ainvoke.assert_awaited_once()
+        self.assertEqual(len(set(seen)), 2)
+        self.assertTrue(all(entry['status'] == 'completed' for entry in result['results'].values()))
+        self.assertTrue(all(not path.exists() for path in seen))
+        commits = {entry['integration']['merged_commit'] for entry in result['results'].values()}
+        self.assertEqual(len(commits), 1)
+        self.assertTrue((self.repo / 'a.txt').exists())
+        self.assertTrue((self.repo / 'b.txt').exists())
+
+    async def test_chain_failed_final_review_keeps_all_changes_off_main(self):
+        async def execute(state, config=None):
+            (Path(state['workspace']) / (state['task']['task_id'] + '.txt')).write_text('candidate')
+            return passed()
+        async def review(state, config=None):
+            return {'status': 'failed', 'output': 'Integration regression', 'error': 'Fix b',
+                    'assessment': {'status': 'fail'}}
+        result, reviewer = await self.run_plan(make_plan(('a', 'b'), [('a', 'b')]), execute, review)
+        reviewer.ainvoke.assert_awaited_once()
+        self.assertEqual(git(self.repo, 'rev-parse', 'HEAD').stdout.strip(), self.initial)
+        for key in ('a', 'b'):
+            entry = result['results'][key]
+            self.assertEqual(entry['status'], 'failed')
+            self.assertFalse((self.repo / f'{key}.txt').exists())
+            self.assertTrue((Path(entry['integration']['worktree']) / f'{key}.txt').exists())
+            self.assertEqual(entry['review']['task_ids'], ['a', 'b'])
 
     async def test_conflicting_tasks_do_not_overwrite_main_and_skip_descendant(self):
         arrived = set()
@@ -108,15 +155,16 @@ class GitTaskTests(unittest.IsolatedAsyncioTestCase):
         async def review(state, config=None):
             return passed()
         result, reviewer = await self.run_plan(make_plan(('a','b','join'), [('a','join'),('b','join')]), execute, review)
-        roots = [result['results'][key] for key in ('a','b')]
-        self.assertEqual(sorted(r['status'] for r in roots), ['completed', 'failed'])
-        failed = next(r for r in roots if r['status'] == 'failed')
-        self.assertIn('CONFLICT', failed['error'])
-        self.assertTrue(Path(failed['integration']['worktree']).exists())
-        self.assertTrue(Path(failed['integration']['review_worktree']).exists())
+        roots = [result['results'][key] for key in ('a', 'b')]
+        self.assertTrue(all(r['status'] == 'failed' for r in roots))
+        for failed in roots:
+            self.assertIn('CONFLICT', failed['error'])
+            self.assertTrue(Path(failed['integration']['worktree']).exists())
+            self.assertTrue(Path(failed['integration']['group_worktree']).exists())
         self.assertEqual(result['results']['join']['status'], 'skipped')
-        self.assertEqual(reviewer.ainvoke.call_count, 1)
-        self.assertIn((self.repo / 'shared.txt').read_text(), ('a\n','b\n'))
+        reviewer.ainvoke.assert_not_called()
+        self.assertEqual(git(self.repo, 'rev-parse', 'HEAD').stdout.strip(), self.initial)
+        self.assertEqual((self.repo / 'shared.txt').read_text(), 'original\n')
         self.assertFalse(git(self.repo, 'status', '--porcelain').stdout.strip())
 
     async def test_failed_review_retains_branch_without_modifying_main(self):
@@ -220,6 +268,8 @@ class GitTaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(second['results']['a']['reused'])
 
     async def test_root_workflow_with_blockbuster_enabled(self):
+        from tests.response_helpers import install_accepted_plan_feedback
+        install_accepted_plan_feedback(self)
         try:
             from blockbuster import blockbuster_ctx
         except ImportError:
@@ -249,15 +299,16 @@ class GitTaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['status'], 'completed', result.get('error'))
         self.assertEqual(result['results']['a']['integration']['status'], 'merged')
 
-    async def test_parallel_response_failures_preserve_both_successful_merges(self):
+    async def test_parallel_merges_need_no_response_model(self):
         async def execute(state, config=None):
             (Path(state['workspace']) / (state['task']['task_id'] + '.txt')).write_text('implemented')
             return passed()
         async def review(state, config=None):
             return passed()
-        with patch('orchestrator.runtime.responses.build_response_model', side_effect=RuntimeError('Unavailable')):
+        with patch('orchestrator.runtime.responses.build_response_model', side_effect=RuntimeError('Unavailable')) as response_model:
             result, _ = await self.run_plan(make_plan(('a','b')), execute, review)
-        self.assertTrue(result['response_error'])
+        response_model.assert_not_called()
+        self.assertFalse(result.get('response_error'))
         self.assertTrue(all(entry['status'] == 'completed' for entry in result['results'].values()))
         self.assertTrue(all(entry['integration']['status'] == 'merged' for entry in result['results'].values()))
         self.assertTrue((self.repo / 'a.txt').exists())

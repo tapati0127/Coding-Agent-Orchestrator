@@ -52,4 +52,5 @@ def build_assessed_agent(config_path, *, role, enrich_task=None, cli_runner=None
 
     return build_two_phase_graph(state_schema=TaskState, output_schema=Assessment,
         settings=settings, prepare=prepare, payload=payload, finish=finish, failure=failure,
-        llm_options=llm_options, cli_runner=cli_runner, chat_factory=chat_factory, agent_name=role.lower())
+        llm_options=llm_options, cli_runner=cli_runner, chat_factory=chat_factory, agent_name=role.lower(),
+        rewrite_responses=False, compact_output=True)

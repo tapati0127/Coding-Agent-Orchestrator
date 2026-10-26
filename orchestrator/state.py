@@ -23,6 +23,9 @@ class TaskState(PhaseState, total=False):
 
 
 class PlanState(PhaseState, total=False):
+    plan_feedback: str
+    plan_approval: dict
+    plan_revision: int
     natural_plan: str
     plan: dict
     replan_count: int

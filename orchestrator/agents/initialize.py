@@ -28,6 +28,7 @@ def build_initialize_agent(config_path: str | Path = DEFAULT_CONFIG, **llm_optio
         return {'workspace': workspace_path(state.get('workspace')), 'output': '', 'cli_error': '',
             'prompt': settings['prompt'], 'clarification': {}, 'error': '', 'status': 'ready', 'response_error': '',
             'natural_plan': '', 'plan': {}, 'results': {}, 'replan_count': 0,
+            'plan_feedback': '', 'plan_approval': {}, 'plan_revision': 0,
             'execution_history': [], 'approved_work': []}
 
     def model():
@@ -74,10 +75,10 @@ def build_initialize_agent(config_path: str | Path = DEFAULT_CONFIG, **llm_optio
                 'natural_response': state.get('output', '')}
 
     def finish(state, decision):
-        ready = decision.ready_for_plan and not decision.missing_information
-        if not decision.summary.strip() or not decision.explanation.strip():
-            raise ValueError('Empty clarification summary/explanation')
-        return {'clarification': decision.model_copy(update={'ready_for_plan': ready}).model_dump(),
+        ready = decision.ready_for_plan
+        if not decision.short_explanation.strip():
+            raise ValueError('Empty clarification short_explanation')
+        return {'clarification': decision.model_dump(),
                 'status': 'ready_for_plan' if ready else 'needs_clarification', 'error': ''}
 
     def failure(state, reason):
@@ -87,4 +88,5 @@ def build_initialize_agent(config_path: str | Path = DEFAULT_CONFIG, **llm_optio
     return build_two_phase_graph(state_schema=WorkflowState, output_schema=ClarificationDecision,
         settings=settings, prepare=prepare, payload=payload, finish=finish, failure=failure,
         llm_options=llm_options, chat_factory=ChatOpenAI, stop_on_cli_error=True,
-        natural_node=RunnableLambda(natural, afunc=anatural), agent_name='initialize')
+        natural_node=RunnableLambda(natural, afunc=anatural), agent_name='initialize',
+        rewrite_responses=False)

@@ -23,10 +23,19 @@ class ThinkingTests(unittest.TestCase):
             self.assertFalse(thinking_options({'thinking': False})['thinking'])
 
     def test_explicit_request_formats(self):
-        self.assertEqual(thinking_body(thinking=False), {'enable_thinking': False})
-        self.assertEqual(thinking_body(thinking=True), {'enable_thinking': True})
+        self.assertEqual(thinking_body(thinking=False, thinking_format='enable_thinking'), {'enable_thinking': False})
+        self.assertEqual(thinking_body(thinking=True, thinking_format='enable_thinking'), {'enable_thinking': True})
         self.assertEqual(thinking_body(thinking=False, thinking_format='chat_template_kwargs'),
                          {'chat_template_kwargs': {'enable_thinking': False}})
+
+    def test_default_chat_payload_disables_thinking_in_template(self):
+        with patch.dict(os.environ, {}, clear=True):
+            factory = Mock()
+            for structured in (False, True):
+                build_chat_model({'base_url': 'http://llm.internal/v1', 'model': 'test'},
+                                 30, chat_factory=factory, structured=structured)
+                self.assertEqual(factory.call_args.kwargs['extra_body'],
+                                 {'chat_template_kwargs': {'enable_thinking': False}})
 
     def test_chat_uses_global_or_role_policy_for_both_call_types(self):
         factory=Mock()

@@ -59,8 +59,8 @@ def plan_artifact(plan: PlanGraph, *, attempt=1):
     parents = validate_plan_graph(plan)
     ids = {node.id: f'task_{i}' for i, node in enumerate(plan.nodes)}
     lines = [f'### Kế hoạch thực thi · lần {attempt}', '',
-             'Các nhánh độc lập có thể chạy song song. Nhiệm vụ chỉ bắt đầu khi tất cả phụ thuộc được duyệt.',
-             'Mỗi nhiệm vụ chạy Execute → Reviewer; khi bật Git isolation, nhiệm vụ chỉ hoàn tất sau merge local. Nhánh phụ thuộc dừng nếu nhiệm vụ trước không đạt.',
+             'Các nhánh độc lập có thể chạy song song. Nhiệm vụ chờ Execute của các phụ thuộc pass; điểm nối nhiều nhánh chờ review nhóm.',
+             'Chuỗi nối tiếp được review ở cuối; các nhánh được review chung trước điểm nối và phần còn lại được review cuối kế hoạch. Nhiệm vụ được đánh dấu cần kiểm tra sớm có mốc review riêng. Khi bật Git isolation, thay đổi chỉ merge vào nhánh đích sau review nhóm; task nối tiếp kế thừa commit trên nhánh tạm.',
              '', '```mermaid', 'flowchart TD', '    start([Bắt đầu])', '    finish([Kết thúc])']
     for node in plan.nodes:
         title = ' '.join(node.instructions.split())

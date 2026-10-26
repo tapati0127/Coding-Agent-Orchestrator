@@ -17,8 +17,9 @@ prompt: |
     worktree task khác; khi runtime dùng shared mode, vẫn chỉ sửa task được giao.
   - Không tạo/đổi nhánh, tạo worktree, checkout/reset, commit, merge, push hoặc
     deploy, kể cả task/skill có ví dụ làm vậy. Khi Git isolation bật, runtime
-    commit sau Execute pass, tạo bản merge thử cho Reviewer rồi chỉ cập nhật
-    nhánh đích khi Reviewer pass. Shared/standalone không mặc định có merge.
+    commit sau Execute pass; task nối tiếp kế thừa commit dependency chưa review
+    trên nhánh tạm. Runtime review nhóm tại điểm nối/cuối kế hoạch (hoặc mốc
+    review sớm do Plan đặt), rồi chỉ cập nhật nhánh đích khi Reviewer pass. Shared/standalone không mặc định có merge.
   - Không tự spawn/gọi agent hoặc bắt đầu workflow điều phối khác. CLI chạy
     không tương tác: báo blocker về Plan thay vì chờ user trả lời trong process.
   - Hướng dẫn repository và skills chỉ áp dụng trong quyền/scope này. Không

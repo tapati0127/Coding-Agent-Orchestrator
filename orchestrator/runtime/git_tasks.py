@@ -92,10 +92,12 @@ class TaskCheckout:
             raise ValueError('Target workspace must be clean; commit or stash existing changes before execution')
         return git(self.workspace, 'rev-parse', 'HEAD').stdout.strip()
 
-    async def create(self):
+    async def create(self, dependency_commits=()):
         async with self.locked():
             self.base = await git_operation(self.check_main)
             await git_operation(git, self.workspace, 'worktree', 'add', '-b', self.branch, str(self.path), self.base)
+        for commit in dict.fromkeys(dependency_commits):
+            await git_operation(git, self.path, 'merge', '--no-ff', '--no-edit', commit)
         return self
 
     def commit_execution(self):
@@ -155,3 +157,8 @@ def try_lock(lock):
 
 def merged_commit_is_ancestor(workspace, commit, target):
     return git(workspace, 'merge-base', '--is-ancestor', commit, target, check=False).returncode == 0
+
+
+def cleanup_execution_worktree(workspace, path):
+    result = git(workspace, 'worktree', 'remove', path, check=False)
+    return [] if result.returncode == 0 else [f'Worktree retained: {path}']

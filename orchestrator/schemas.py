@@ -32,6 +32,7 @@ ExecuteAssessment = Assessment
 
 class ExecuteNode(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
+    review_after: bool = False
     id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]*$")
     instructions: str = Field(min_length=1)
     context: str = Field(min_length=1)
@@ -83,7 +84,11 @@ def validate_plan_graph(plan: PlanGraph) -> dict[str, list[str]]:
 
 class ClarificationDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
+    short_explanation: str = Field(min_length=1)
     ready_for_plan: bool
-    summary: str = Field(min_length=1)
-    missing_information: list[str]
-    explanation: str = Field(min_length=1)
+
+
+class PlanApprovalDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    short_explanation: str = Field(min_length=1)
+    ready_for_execute: bool

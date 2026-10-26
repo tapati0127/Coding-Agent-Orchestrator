@@ -26,6 +26,8 @@ class PlanAgentTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         from tests.response_helpers import install_response_model
         install_response_model(self)
+        from tests.response_helpers import install_accepted_plan_feedback
+        install_accepted_plan_feedback(self)
         isolation = patch.dict('os.environ', {'GIT_TASK_ISOLATION': 'false'})
         isolation.start()
         self.addCleanup(isolation.stop)
@@ -228,7 +230,8 @@ class PlanAgentTests(unittest.IsolatedAsyncioTestCase):
                 recovery = PlanGraph.model_validate({'nodes': [renamed, node('b')],
                     'edges': [{'source': 'a_renamed', 'target': 'b'}]})
                 chat.return_value.with_structured_output.return_value.ainvoke = AsyncMock(side_effect=[
-                    plan(('a', 'b'), [('a', 'b')]), recovery])
+                    PlanGraph(nodes=[{**node('a'), 'review_after': True}, node('b')],
+                              edges=[{'source': 'a', 'target': 'b'}]), recovery])
                 with patch('orchestrator.agents.execute.run_llm_cli', side_effect=['a implemented', 'b implemented', 'b repaired']) as execute:
                     result = await build_graph(base_url='http://internal/v1', model='coder').ainvoke({
                         'workspace': workspace, 'messages': [('user', 'Keep public API unchanged')],
@@ -267,8 +270,9 @@ class PlanAgentTests(unittest.IsolatedAsyncioTestCase):
         result = await build_execution_graph(plan(('a', 'b'), [('a', 'b')]), executor,
             reviewer=self.reviewer, messages=[('user', 'Task')]).ainvoke({'workspace': '.', 'results': {}})
         self.assertEqual(result['results']['a']['status'], 'failed')
-        self.assertEqual(result['results']['b']['status'], 'skipped')
-        self.assertEqual(executor.ainvoke.call_count, 1)
+        self.assertEqual(result['results']['b']['status'], 'failed')
+        self.assertEqual(executor.ainvoke.call_count, 2)
+        self.reviewer.ainvoke.assert_awaited_once()
 
     def test_validate_graph(self):
         cases = [plan(('a', 'a')), plan(('a',), [('a', 'unknown')]),

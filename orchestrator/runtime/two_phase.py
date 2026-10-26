@@ -54,7 +54,7 @@ def workspace_path(value=None):
 def build_two_phase_graph(*, state_schema, output_schema, settings, prepare,
                           payload, finish, failure, llm_options=None,
                           cli_runner=None, chat_factory=None, stop_on_cli_error=False,
-                          agent_name='agent', natural_node=None):
+                          agent_name='agent', natural_node=None, rewrite_responses=True, compact_output=False):
     """Role hooks adapt input/output; CLI/config/model/error lifecycle is shared.
 
     State schema must expose workspace, prompt, output and cli_error. Hooks:
@@ -81,8 +81,8 @@ def build_two_phase_graph(*, state_schema, output_schema, settings, prepare,
             if not output.strip():
                 raise ValueError('CLI returned empty output')
             return {'output': output, 'cli_error': '',
-                    'messages': [AIMessage(content=output, name=agent_name),
-                        cli_finished_message(state)]}
+                    'messages': ([cli_finished_message(state)] if compact_output else
+                        [AIMessage(content=output, name=agent_name), cli_finished_message(state)])}
         except subprocess.TimeoutExpired:
             reason = f'CLI timed out after {timeout}s'
         except Exception as exc:
@@ -149,24 +149,28 @@ def build_two_phase_graph(*, state_schema, output_schema, settings, prepare,
             + ' Xem chi tiết tiến độ tại [Terminal Monitor](/terminals).')]}
 
     def announce_result(state):
+        if compact_output and state.get('status') == 'planned':
+            return {}
         task_id = state.get('task', {}).get('task_id', '')
         label = agent_name.capitalize() + (f' {task_id}' if task_id else '')
         if state.get('status') == 'planned':
             content = f'Plan đã lập kế hoạch gồm {len(state["plan"]["nodes"])} nhiệm vụ.'
         elif state.get('status') == 'completed':
-            content = f'{label}: pass. ' + state.get('assessment', {}).get('explanation', '')
+            stage = {'execute': ' Chờ review tại mốc của nhóm nhiệm vụ.',
+                     'reviewer': ' Đã duyệt; bước tích hợp Git do runtime xử lý.'}.get(agent_name, '')
+            content = f'{label}: pass.' + stage + ' ' + state.get('assessment', {}).get('explanation', '')
         else:
             content = f'{label}: chưa hoàn thành. ' + state.get('error', 'Không có kết quả hợp lệ.')
         return {'messages': [progress_message(agent_name, task_id, content)]}
 
     graph = StateGraph(state_schema)
-    graph.add_node('prepare', logged_node(agent_name, 'prepare', prepare, response_options=options))
-    graph.add_node('coding', logged_node(agent_name, 'coding', natural_node if natural_node is not None else coding, response_options=options))
-    graph.add_node('structure', logged_node(agent_name, 'structure', RunnableLambda(structure, afunc=astructure), response_options=options).with_config(tags=['no_stream']))
+    graph.add_node('prepare', logged_node(agent_name, 'prepare', prepare, response_options=options, rewrite_responses=rewrite_responses))
+    graph.add_node('coding', logged_node(agent_name, 'coding', natural_node if natural_node is not None else coding, response_options=options, rewrite_responses=rewrite_responses))
+    graph.add_node('structure', logged_node(agent_name, 'structure', RunnableLambda(structure, afunc=astructure), response_options=options, rewrite_responses=rewrite_responses).with_config(tags=['no_stream']))
     graph.add_edge(START, 'prepare')
     if natural_node is None:
-        graph.add_node('announce_start', logged_node(agent_name, 'announce_start', announce_start, response_options=options))
-        graph.add_node('announce_result', logged_node(agent_name, 'announce_result', announce_result, response_options=options))
+        graph.add_node('announce_start', logged_node(agent_name, 'announce_start', announce_start, response_options=options, rewrite_responses=rewrite_responses))
+        graph.add_node('announce_result', logged_node(agent_name, 'announce_result', announce_result, response_options=options, rewrite_responses=rewrite_responses))
         graph.add_edge('prepare', 'announce_start')
         graph.add_edge('announce_start', 'coding')
     else:

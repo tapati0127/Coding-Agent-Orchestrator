@@ -56,3 +56,39 @@ class MilestoneMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message_delta([before], [before]), [])
         self.assertEqual(message_delta([after], [before]), [after])
         self.assertEqual(len(add_messages([before], [after])), 1)
+
+    async def test_full_task_network_only_calls_each_role_assessor_once(self):
+        import json
+        from orchestrator.agents.reviewer import build_reviewer_agent
+        from orchestrator.runtime.network import build_execution_graph
+        from tests.test_graph import plan
+        result_assessment = Assessment(status='pass', notes=[], explanation='Checks passed', blockers=[])
+        with tempfile.TemporaryDirectory() as workspace, \
+             patch.dict('os.environ', {'GIT_TASK_ISOLATION': 'false'}), \
+             patch('orchestrator.agents.execute.run_llm_cli', return_value='PRIVATE execute report') as execute_cli, \
+             patch('orchestrator.agents.reviewer.run_llm_cli', return_value='PRIVATE review report') as review_cli, \
+             patch('orchestrator.agents.execute.ChatOpenAI') as execute_chat, \
+             patch('orchestrator.agents.reviewer.ChatOpenAI') as review_chat, \
+             patch('orchestrator.runtime.responses.build_response_model') as response_model:
+            for chat in (execute_chat, review_chat):
+                chat.return_value.with_structured_output.return_value.ainvoke = AsyncMock(return_value=result_assessment)
+            options = {'base_url': 'http://internal/v1', 'model': 'coder'}
+            network = build_execution_graph(plan(['a']), build_execute_agent(**options),
+                reviewer=build_reviewer_agent(**options))
+            result = await network.ainvoke({'workspace': workspace, 'results': {},
+                'messages': [('user', 'Implement a')]})
+        response_model.assert_not_called()
+        execute_cli.assert_called_once()
+        review_cli.assert_called_once()
+        for chat, report in ((execute_chat, 'PRIVATE execute report'), (review_chat, 'PRIVATE review report')):
+            chat.assert_called_once()
+            assessor = chat.return_value.with_structured_output.return_value.ainvoke
+            assessor.assert_awaited_once()
+            self.assertEqual(json.loads(assessor.call_args.args[0][1].content)['report'], report)
+        self.assertEqual(result['results']['a']['status'], 'completed')
+        self.assertEqual(result['results']['a']['output'], 'PRIVATE execute report')
+        self.assertEqual(result['results']['a']['review']['output'], 'PRIVATE review report')
+        chat_text = str([m.content for m in result['messages']])
+        self.assertNotIn('PRIVATE', chat_text)
+        self.assertIn('Chờ review tại mốc', chat_text)
+        self.assertIn('đã duyệt nhóm', chat_text.lower())

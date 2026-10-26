@@ -16,7 +16,7 @@ def thinking_options(settings=None, options=None):
         enabled = raw in {'true', '1', 'yes'}
     if not isinstance(enabled, bool):
         raise ValueError('thinking must be a boolean or null')
-    fmt = settings.get('thinking_format') or options.get('thinking_format') or os.getenv('LLM_THINKING_FORMAT', 'enable_thinking')
+    fmt = settings.get('thinking_format') or options.get('thinking_format') or os.getenv('LLM_THINKING_FORMAT', 'chat_template_kwargs')
     if fmt not in FORMATS:
         raise ValueError('thinking_format must be enable_thinking or chat_template_kwargs')
     return {**options, 'thinking': enabled, 'thinking_format': fmt}

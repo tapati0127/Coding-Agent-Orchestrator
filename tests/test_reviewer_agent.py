@@ -31,7 +31,7 @@ class ReviewerAgentTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('Execute says fixed', prompt)
             self.assertIn('src/auth.py', prompt)
             self.assertEqual(result['assessment']['status'], verdict)
-            self.assertEqual(result['messages'][-1].name, 'reviewer')
+            self.assertEqual(result['messages'][-1].name, 'progress')
             self.assertIn('no_stream', chat.return_value.with_structured_output.return_value.ainvoke.call_args.kwargs['config']['tags'])
             self.assertEqual(result['status'], 'completed' if verdict == 'pass' else 'failed')
             chat.return_value.with_structured_output.return_value.ainvoke.assert_called_once()

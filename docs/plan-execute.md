@@ -39,8 +39,10 @@ CLI, không đảm bảo CLI đọc được ảnh/binary nhúng.
 
 Plan CLI trả `natural_plan`; model structured trả `plan` với đúng `nodes` và
 `edges`. Graph phải là DAG, node ID duy nhất, edge không trùng và endpoint tồn tại.
-Runtime tự nối START/END, build graph task theo phụ thuộc. Mỗi task là graph
-Execute → Reviewer có conditional edge: chỉ gọi Reviewer khi Execute completed.
+Runtime dùng `review_network.py` để chạy task theo dependency và tạo mốc
+review trước điểm nối, sau task review_after=true, và cuối kế hoạch. Chuỗi nối
+tiếp không review sau từng task. `build_task_graph(executor, reviewer)` vẫn là
+API độc lập để caller chủ động chạy review riêng một task.
 
 Execute và Reviewer đều trả báo cáo tự nhiên ở `output` và `assessment`:
 
@@ -53,13 +55,14 @@ Execute và Reviewer đều trả báo cáo tự nhiên ở `output` và `assess
 }
 ```
 
-Assessment pass ánh xạ status completed; fail ánh xạ failed. CLI có lỗi,
+Trong role, assessment pass ánh xạ status completed; fail ánh xạ failed.
+Trong network, Execute pass chỉ là executed cho đến khi nhóm review pass. CLI có lỗi,
 blockers hoặc structured output lỗi luôn fail. CLI exit 0 không tự đồng nghĩa
 pass. Reviewer CLI đọc code/chạy kiểm tra thực tế; model structured chỉ đánh giá
 báo cáo đó. Reviewer nhận messages đã lọc artifact hiển thị, task, findings và kết quả Execute.
 
 Root trả `results` của mạng gần nhất; từng node có output/assessment Execute và
-`review` chứa output/assessment Reviewer. `approved_work` chứa task đã review
+`review` chứa output/assessment Reviewer, review_group và task_ids của cả nhóm. `approved_work` chứa task đã review
 pass. `execution_history` giữ mọi lần chạy; `replan_count` là số lần lập lại.
 Reviewer fail được đưa về Plan như Execute fail, gồm đầy đủ notes và explanation.
 
@@ -96,18 +99,19 @@ message/context propagation, fan-out và join có nhánh dài ngắn khác nhau.
 
 Initialize là subgraph đầu tiên, dùng cùng graph hai phase với natural_node
 ChatOpenAI thay coding CLI. Lần đầu tạo AIMessage hỏi làm rõ hoặc xác nhận phạm
-vi; lần thứ hai gọi structured output ClarificationDecision gồm ready_for_plan,
-summary, missing_information và explanation. Chỉ ready_for_plan=true và không
-còn missing_information mới chuyển Plan. Ngược lại graph END với status
+vi; câu trả lời hiển thị trực tiếp, không qua model viết lại. Lần thứ hai gọi
+structured output ClarificationDecision gồm short_explanation rồi ready_for_plan.
+Chỉ ready_for_plan=true mới chuyển Plan. Ngược lại graph END với status
 needs_clarification, giữ câu hỏi trong messages. Lỗi model trả failed, không
 chuyển Plan. Vòng replan kỹ thuật quay thẳng về Plan, không hỏi lại Initialize.
 
-Mọi lần tạo nội dung tự nhiên (Initialize/Plan/Execute/Reviewer) thêm AIMessage
-mới, name tương ứng role. Reducer add_messages giữ lịch sử; graph động gom các
+Initialize thêm AIMessage hội thoại; Plan phát một thông báo kèm artifact;
+Execute/Reviewer chỉ cập nhật message tiến độ, không đưa báo cáo CLI vào chat.
+Reducer add_messages giữ lịch sử; graph động gom các
 message mới của Execute/Reviewer về root, không nhân bản lịch sử hay approval
 được tái sử dụng. Bước structured cập nhật field nghiệp vụ; riêng Plan trả thêm
 AIMessage lời tóm tắt kèm artifact sau khi DAG được validate. Payload artifact
-dựng bằng code; phần lời qua model phản hồi như mô tả bên dưới. Initialize phát
+và phần lời Plan đều dựng bằng code. Initialize phát
 thêm phản hồi giải thích nếu bước readiness thất bại.
 Tất cả node và model invocation structured có tag no_stream; ChatOpenAI của
 bước này dùng streaming=False, disable_streaming=True. Khi dùng stream_mode
@@ -128,14 +132,13 @@ hình endpoint nội bộ nêu trên. Initialize không đọc code hoặc chạ
 Graph role coding được chia thành:
 `prepare → announce_start → coding → structure → announce_result`.
 announce_start trả AIMessage trước khi CLI chạy, nêu tên CLI và liên kết
-`/terminals`. Node coding trả báo cáo tự nhiên cùng AIMessage thông báo CLI đã
+`/terminals`. Node coding giữ báo cáo trong output và trả AIMessage thông báo CLI đã
 kết thúc và đang xử lý structured output; lỗi/timeout cũng có thông báo tương ứng.
 announce_result đọc status và assessment, trả AIMessage pass/fail sau khi
-structured output hoàn tất. Nội dung
-báo cáo CLI vẫn là message riêng. Initialize giữ hai bước hội thoại và quyết định.
+structured output hoàn tất. Báo cáo CLI không đưa vào chat. Initialize giữ hai bước hội thoại và quyết định.
 
-Root chạy `initialize → announce_plan → plan → announce_execution →
-execute_network → summarize_execution`. Nếu cần hỏi làm rõ thì dừng ngay sau Initialize.
+Root chạy `initialize → announce_plan → plan → request_plan_feedback →
+assess_plan_approval → announce_execution → execute_network → summarize_execution`. Nếu cần hỏi làm rõ thì dừng ngay sau Initialize.
 Summary nêu số task được duyệt, task fail/skipped và có replan tiếp hay không;
 các số liệu được tính tất định, còn lời diễn đạt qua bước user_response; không có timer. prepare_replan cũng trả thông báo trước khi
 quay qua announce_plan rồi vào Plan. ID team-progress dùng chung cho summary toàn team; từng role/task
@@ -145,6 +148,9 @@ có ID progress:<role>:<task_id>. Reducer thay nội dung message cũ theo ID.
 subgraphs=True, đọc messages của mỗi node; UI upsert theo message.id. Chỉ dùng
 ainvoke sẽ nhận toàn bộ kết quả sau khi workflow kết thúc. stream_mode messages
 chủ yếu dành cho token từ model, không thay thế updates cho AIMessage do node tạo.
+Scheduler còn phát custom event `{node, update}` sau mỗi Execute/mốc review;
+consumer có thể đọc stream_mode=["updates", "custom"] để cập nhật trạng thái
+executed/completed và messages theo ID.
 Xem ví dụ: `python -m examples.stream_progress 'Thêm API health và test'`.
 
 ## Workdir riêng cho từng coding CLI
@@ -222,7 +228,7 @@ Sau khi structured PlanGraph được validate thành công, `agents/plan.py:fin
 gọi `runtime/artifacts.py:plan_artifact()`. AIMessage có name `plan`, nội dung
 Mermaid `flowchart TD` và bảng nhiệm vụ/phụ thuộc/tiêu chí hoàn thành. Sơ đồ nối
 START với các root, các edge đúng DAG và các leaf với END; mỗi node được chạy
-qua Execute rồi Reviewer. Đây là kế hoạch, không phải trạng thái thực thi từng
+qua Execute; Reviewer được chèn tại các mốc nhóm nêu trong artifact. Đây là kế hoạch, không phải trạng thái thực thi từng
 node. Client không render Mermaid vẫn đọc được bảng Markdown.
 
 Artifact-only có metadata `additional_kwargs.orchestrator_artifact`, gồm type,
@@ -310,22 +316,25 @@ root repository có commit, đang checkout đúng nhánh đích và sạch; runt
 repo bẩn, thư mục không phải Git hoặc nhánh không khớp, không tự stash/reset.
 `GIT_TASK_ISOLATION=false` giữ chế độ shared workspace cũ cho tương thích.
 Graph Execute độc lập vẫn làm việc tại workspace caller truyền; isolation được
-điều phối ở DAG qua `runtime/network.py:run_isolated_task()`.
+điều phối bởi `runtime/review_network.py`.
 
 `runtime/git_tasks.py:TaskCheckout` thực hiện chu trình:
 
-1. Khóa repository, lấy HEAD của nhánh chính và tạo worktree/nhánh task duy nhất.
-2. Thả khóa, chạy Executor trên checkout riêng; các Executor chạy song song.
-3. Execute pass: runtime stage và commit thay đổi trong checkout đó. Các commit
-   tự động dùng identity Orchestrator / orchestrator@localhost, không đổi git config.
-4. Lấy khóa tích hợp, tạo nhánh/worktree review từ main mới nhất và merge task
-   vào đó. Nếu conflict, main không đổi; giữ worktree conflict để điều tra.
-5. Gọi Reviewer trên bản merge thử, kiểm tra code/test và ảnh hưởng tích hợp.
-6. Chỉ khi review completed/assessment pass, HEAD và trạng thái checkout review
-   không bị Reviewer sửa, main vẫn đúng phiên bản đã review và sạch, mới merge
-   `--ff-only` commit đã review vào main. Giữ khóa đến khi xong bước tích hợp.
-7. Thành công: dọn worktree bằng git worktree remove, giữ nhánh/commit và metadata
-   integration. Dọn lỗi không đổi một merge đã thành công thành failed.
+1. Tạo worktree/nhánh riêng cho mỗi Execute từ nhánh đích sạch; merge các commit
+   dependency vào worktree đó trước khi chạy để kế thừa thay đổi chưa review.
+2. Execute pass: commit trong nhánh tạm, giữ kết quả provisional executed.
+   Chuỗi nối tiếp tiếp tục trên worktree riêng, chưa cập nhật nhánh đích.
+3. Tại điểm nối nhiều nhánh, mốc review_after hoặc cuối kế hoạch, gom task chưa
+   review thuộc nhóm. Tạo candidate chung từ các commit của nhóm.
+4. Giữ khóa tích hợp; merge candidate với nhánh đích mới nhất trong worktree
+   review riêng. Reviewer kiểm tra toàn bộ diff/tiêu chí/tương tác của nhóm.
+5. Nếu review pass, candidate nguyên vẹn và nhánh đích vẫn đúng phiên bản đã
+   review, fast-forward nhánh đích một lần cho cả nhóm. Chuyển các task trong
+   nhóm sang completed và lưu cùng review.task_ids/review_group/merged_commit.
+6. Nếu review/conflict thất bại, cả nhóm chưa được duyệt, nhánh đích không đổi;
+   giữ các worktree/branch cho Plan điều tra. Nhóm khác đã duyệt vẫn được giữ.
+7. Thành công: dọn worktree Execute và candidate bằng git worktree remove,
+   giữ nhánh/commit. Lỗi dọn worktree không đổi merge thành failed.
 
 Khóa `flock` ở Git common directory phối hợp giữa các task và các tiến trình
 orchestrator cùng repository. Git operations đang chạy được chờ kết thúc trước
@@ -335,10 +344,12 @@ bên ngoài không tuân thủ khóa. Không push remote, không tạo hoặc me
 
 `results[task_id].integration` có `branch`, `target_branch`, `commit`,
 `merged_commit` và `status=merged` khi thành công. Khi chưa merge, metadata có
-`worktree`, `review_worktree`, `base_commit`, `status=not_merged`. Plan nhận metadata
+`worktree`, `review_worktree`, `group_worktree`, `group_branch`, `base_commit`,
+`status=not_merged`. Plan nhận metadata
 trong execution_history để phân tích conflict hoặc giao task phục hồi từ main
 mới nhất và thay đổi của nhánh lỗi. Không tự bỏ thay đổi của task khác để hết conflict.
-Task phụ thuộc chỉ chạy sau khi task trước completed và đã merge.
+Task nối tiếp có thể dùng commit dependency khi còn executed. Task sau điểm
+nối hoặc mốc review sớm phải chờ nhóm được duyệt và merge.
 
 Worktree lỗi được giữ; worktree thành công được dọn, nhánh không tự xóa.
 `GIT_WORKTREE_ROOT` mặc định `/tmp/orchestrator-worktrees`; với Compose cần đặt
@@ -496,7 +507,15 @@ bịa một node để thỏa minItems. Graph có task vẫn phải thỏa mọi
 
 ## ChatOpenAI viết phản hồi cho người dùng
 
-`runtime/responses.py` là lớp diễn đạt chung gọi từ wrapper node trong logging.py.
+`runtime/responses.py` là lớp diễn đạt gọi từ wrapper node trong logging.py.
+Initialize, Plan, Execute và Reviewer tắt lớp này. Initialize trả lời trực tiếp;
+Plan hiển thị tiến độ bằng code và một thông báo kèm artifact DAG đã validate.
+Execute/Reviewer hiển thị các mốc bằng code, trạng thái cùng explanation từ
+assessment; mỗi role còn một lượt CLI và một lần structured pass/fail. Báo cáo
+CLI giữ trong state/log, không đưa vào chat. Execute pass chuyển Reviewer;
+Reviewer pass chưa đồng nghĩa đã merge. Các wrapper task/network/execute_network
+cũng tắt viết lại, kể cả thông báo tích hợp Git. Team announce_execution dùng
+code; tổng kết và chuẩn bị technical replan của team vẫn dùng lớp diễn đạt.
 Chỉ xử lý các AIMessage mới, không phải artifact-only, chưa có marker
 `orchestrator_response.rewritten=true`. Mỗi message được thêm một call ChatOpenAI
 plain text. Các node ở graph cha không viết lại message đã xử lý từ graph con.
@@ -517,8 +536,8 @@ Prompt yêu cầu dùng ngôn ngữ/mức độ kỹ thuật phù hợp, không 
 không coi một bước pass là đã merge hoặc toàn workflow hoàn tất.
 
 Field output/natural_plan/assessment/results giữ báo cáo/quyết định kỹ thuật gốc.
-Initialize structured payload có thêm natural_response gốc để bản diễn đạt không
-làm mất điều kiện/câu hỏi. Lớp phản hồi không đổi status, gọi retry/replan hay sửa
+Initialize không dùng lớp viết lại; structured payload có natural_response là
+câu trả lời hiển thị trực tiếp để đánh giá readiness cùng lịch sử hội thoại. Lớp phản hồi không đổi status, gọi retry/replan hay sửa
 kết quả merge. Khi lỗi, chỉ bỏ phần lời chưa viết được, ghi response_error và log;
 không thay bằng raw report hoặc câu mẫu. Artifact tất định vẫn được giữ.
 
@@ -526,3 +545,52 @@ Plan phát phần lời kế hoạch và artifact ở cùng update; lớp phản
 rồi attach_artifacts() ghép payload vào AIMessage. Artifact-only bàn giao không
 cần gọi model. Đầu vào model phản hồi lẫn các agent tiếp theo đều bỏ payload này,
 nhưng người dùng vẫn thấy đầy đủ phần lời và artifact trong lịch sử state.
+
+
+## Duyệt kế hoạch trước Execute
+
+Sau mỗi Plan thành công, `request_plan_feedback` gọi `interrupt()` với câu hỏi
+và DAG hiện tại. Node này không chạy CLI/model, nên resume không lặp tác vụ.
+Caller gửi `Command(resume="phản hồi người dùng")` trên cùng thread/checkpointer.
+`assess_plan_approval` dùng cấu hình `config/plan_approval.yaml` tạo
+`PlanApprovalDecision`: `short_explanation` trước rồi `ready_for_execute`.
+Đồng ý thì chuyển Execute; yêu cầu sửa/chưa rõ thì tăng `plan_revision`, gửi
+kế hoạch trước, phản hồi và lý do đánh giá cho Plan rồi hỏi duyệt lại.
+Lỗi structured approval dừng failed và không chạy Execute. Chỉnh theo góp ý
+không dùng ngân sách `max_replans`; technical replan vẫn phải hỏi duyệt kế
+hoạch mới. `dispatch_execute=False` giữ chế độ chỉ lập kế hoạch, không interrupt.
+Chạy Python trực tiếp truyền `checkpointer` vào `build_graph()`; graph mặc định
+trên LangGraph Server dùng checkpoint do server quản lý. Xem ví dụ resume trong README.
+
+
+Execute/Reviewer dùng `compact_output=True`, `rewrite_responses=False` trong
+`build_assessed_agent()`. Lỗi CLI/blocker vẫn không thể được assessment nâng
+thành pass; lỗi structured output vẫn dừng failed. Cơ chế review, merge và
+replan không thay đổi khi bỏ các lượt viết lại thông báo.
+
+
+## Mốc review theo DAG và streaming
+
+`review_schedule()` gán mỗi task cho đúng một mốc: ưu tiên mốc reachable đầu
+trong thứ tự topo, rồi đến review cuối. Nhánh có ancestor chung không review
+ancestor đó hai lần: mốc sau chờ mốc đang sở hữu ancestor. Không tạo barrier
+chung cho các nhánh không liên quan; scheduler async chỉ chờ prerequisite của
+từng job, tôn trọng max_concurrency nếu caller cấu hình.
+
+Reviewer nhận `task.context` có tasks/execution_results và execution_result có
+task_results của toàn nhóm; integration chứa diff candidate tích hợp. Một lỗi
+review làm cả nhóm chưa được duyệt. Task đã duyệt có thể được tái dùng khi replan;
+khi isolation bật, merged_commit phải còn ở nhánh đích. Group thất bại không
+được thêm vào approved_work. Với shared mode, các Execute vẫn dùng cùng workspace;
+chỉ isolation cung cấp candidate Git riêng và kiểm soát merge.
+
+Network bao gồm node điều phối run_review_network. Custom stream phát
+`{"node": "task_id hoặc mốc review", "update": {...}}`; update chứa results và
+messages theo cùng hợp đồng ID. Ví dụ nối tiếp A→B→C chỉ có một Reviewer;
+A/B song song→J có một Reviewer cho A/B trước J, rồi Reviewer cuối cho J.
+
+Trên Python 3.11+, scheduler dùng LangGraph task cho từng Execute và mốc review,
+đăng ký theo thứ tự topo cố định. Khi có checkpointer, resume dùng lại kết quả
+job đã lưu, không chạy lại CLI/review đã hoàn tất; kết quả cached cũng được áp
+dụng theo dependency. Python 3.10 chạy scheduler async nhưng không có checkpoint
+từng job vì LangGraph không hỗ trợ async functional task trên phiên bản đó.

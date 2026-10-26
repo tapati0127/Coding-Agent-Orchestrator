@@ -40,7 +40,7 @@ class ExecuteAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['status'], 'completed')
         self.assertEqual(result['assessment']['status'], 'pass')
         self.assertEqual(result['output'], 'Implemented; tests passed')
-        self.assertEqual(result['messages'][-1].name, 'execute')
+        self.assertEqual(result['messages'][-1].name, 'progress')
         self.assertIn('no_stream', self.structured.ainvoke.call_args.kwargs['config']['tags'])
         self.assertIn('Preserve ${value} and {braces}', cli.call_args.args[0])
         self.assertEqual(cli.call_args.kwargs['task_title'], 'Preserve ${value} and {braces}')

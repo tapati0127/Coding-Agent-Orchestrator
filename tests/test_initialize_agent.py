@@ -12,8 +12,7 @@ from orchestrator.schemas import ClarificationDecision
 
 
 def decision(ready, missing=None):
-    return ClarificationDecision(ready_for_plan=ready, summary='Implement requested API',
-        missing_information=missing or [], explanation='Ready' if ready else 'Need API scope')
+    return ClarificationDecision(short_explanation='Ready' if ready else 'Need API scope', ready_for_plan=ready)
 
 
 class InitializeAgentTests(unittest.IsolatedAsyncioTestCase):
@@ -31,6 +30,16 @@ class InitializeAgentTests(unittest.IsolatedAsyncioTestCase):
         self.structure = self.chat.return_value.with_structured_output.return_value
         self.structure.ainvoke = AsyncMock(return_value=decision(False, ['API endpoints']))
         self.structure.invoke.return_value = decision(False, ['API endpoints'])
+
+    async def test_initialize_does_not_call_response_rewriter(self):
+        with tempfile.TemporaryDirectory() as workspace, patch.dict(os.environ, {'WORKSPACE_ROOT': workspace}), \
+             patch('orchestrator.runtime.responses.build_response_model') as response_model:
+            result = await build_initialize_agent().ainvoke({'messages': [('user', 'Add an API')]})
+        response_model.assert_not_called()
+        self.assertEqual(result['messages'][-1].content, 'Which API endpoints should I add?')
+        self.assertEqual(list(ClarificationDecision.model_fields), ['short_explanation', 'ready_for_plan'])
+        self.chat.return_value.ainvoke.assert_called_once()
+        self.structure.ainvoke.assert_called_once()
 
     async def test_unclear_stops_before_plan_without_workspace_argument(self):
         with tempfile.TemporaryDirectory() as workspace, patch.dict(os.environ, {'WORKSPACE_ROOT': workspace}), \
@@ -64,7 +73,7 @@ class InitializeAgentTests(unittest.IsolatedAsyncioTestCase):
                 chat.return_value.with_structured_output.return_value.ainvoke = AsyncMock(return_value=plan(['health']))
                 result = await build_graph(dispatch_execute=False).ainvoke({'messages': [*first['messages'], ('user', 'GET /health returns 200 JSON')]})
         self.assertEqual(result['status'], 'planned')
-        self.assertEqual([m.name for m in result['messages'] if isinstance(m, AIMessage) and m.name != 'progress'], ['initialize', 'initialize', 'plan_handoff', 'plan', 'plan'])
+        self.assertEqual([m.name for m in result['messages'] if isinstance(m, AIMessage) and m.name != 'progress'], ['initialize', 'initialize', 'plan_handoff', 'plan'])
         self.assertIn('GET /health returns 200 JSON', cli.call_args.args[0])
         payload = json.loads(self.structure.ainvoke.call_args.args[0][1].content)
         self.assertEqual(payload['messages'][-1]['data']['content'], 'I will hand the health endpoint task to Plan')
@@ -77,15 +86,15 @@ class InitializeAgentTests(unittest.IsolatedAsyncioTestCase):
         structured = next(update['structure'] for update in updates if 'structure' in update)
         self.assertEqual(len(coding['messages']), 1)
         self.assertEqual(structured['messages'][0].name, 'initialize')
-        self.assertTrue(structured['messages'][0].additional_kwargs['orchestrator_response']['rewritten'])
+        self.assertNotIn('orchestrator_response', structured['messages'][0].additional_kwargs)
         self.assertEqual(structured['status'], 'failed')
 
-    def test_sync_support_and_inconsistent_ready_is_rejected(self):
-        self.structure.invoke.return_value = decision(True, ['Required contract'])
+    def test_sync_support_and_ready_handoff(self):
+        self.structure.invoke.return_value = decision(True)
         with tempfile.TemporaryDirectory() as workspace, patch.dict(os.environ, {'WORKSPACE_ROOT': workspace}):
             result = build_initialize_agent().invoke({'messages': [('user', 'Task')]})
-        self.assertEqual(result['status'], 'needs_clarification')
-        self.assertFalse(result['clarification']['ready_for_plan'])
+        self.assertEqual(result['status'], 'ready_for_plan')
+        self.assertEqual(result['clarification'], {'short_explanation': 'Ready', 'ready_for_plan': True})
         self.assertIn('no_stream', self.structure.invoke.call_args.kwargs['config']['tags'])
 
     async def test_natural_failure_does_not_call_structure(self):

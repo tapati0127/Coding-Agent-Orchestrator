@@ -29,6 +29,8 @@ class GraphIntegrationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         from tests.response_helpers import install_response_model
         install_response_model(self)
+        from tests.response_helpers import install_accepted_plan_feedback
+        install_accepted_plan_feedback(self)
         isolation = patch.dict('os.environ', {'GIT_TASK_ISOLATION': 'false'})
         isolation.start()
         self.addCleanup(isolation.stop)
@@ -37,7 +39,7 @@ class GraphIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(initializer.stop)
         chat.return_value.ainvoke = AsyncMock(return_value=AIMessage(content='Requirements are clear'))
         chat.return_value.with_structured_output.return_value.ainvoke = AsyncMock(return_value=ClarificationDecision(
-            ready_for_plan=True, summary='Implement requested API', missing_information=[], explanation='Sufficient user details'))
+            short_explanation='Sufficient user details', ready_for_plan=True))
 
     async def test_all_three_real_subgraphs_replan_and_preserve_approved_work(self):
         with tempfile.TemporaryDirectory() as workspace:
@@ -47,7 +49,9 @@ class GraphIntegrationTests(unittest.IsolatedAsyncioTestCase):
                  patch('orchestrator.agents.plan.ChatOpenAI') as plan_chat, \
                  patch('orchestrator.agents.execute.ChatOpenAI') as execute_chat, \
                  patch('orchestrator.agents.reviewer.ChatOpenAI') as review_chat:
-                plan_chat.return_value.with_structured_output.return_value.ainvoke = AsyncMock(side_effect=[plan(['a', 'b']), plan(['a', 'b'])])
+                initial_plan = plan(['a', 'b'])
+                initial_plan.nodes[0].review_after = True
+                plan_chat.return_value.with_structured_output.return_value.ainvoke = AsyncMock(side_effect=[initial_plan, plan(['a', 'b'])])
                 execute_chat.return_value.with_structured_output.return_value.ainvoke = AsyncMock(return_value=assessment('pass', 'Implemented and tested'))
                 review_chat.return_value.with_structured_output.return_value.ainvoke = AsyncMock(side_effect=[
                     assessment('pass', 'a approved'), assessment('fail', 'b regression requires repair'),
@@ -58,12 +62,12 @@ class GraphIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['status'], 'completed')
         names = [message.name for message in result['messages']]
         self.assertEqual(names.count('initialize'), 1)
-        self.assertEqual(names.count('plan'), 4)
+        self.assertEqual(names.count('plan'), 2)
         artifacts = [m for m in result['messages'] if any(a.get('type') == 'execution_plan' for a in m.additional_kwargs.get('orchestrator_artifacts', []))]
         self.assertEqual([m.additional_kwargs['orchestrator_artifacts'][0]['attempt'] for m in artifacts], [1, 2])
-        self.assertEqual(names.count('execute'), 3)
-        self.assertEqual(names.count('reviewer'), 3)
-        self.assertEqual(len(result['messages']), 20)
+        self.assertEqual(names.count('execute'), 0)
+        self.assertEqual(names.count('reviewer'), 0)
+        self.assertEqual(len(result['messages']), len({m.id for m in result['messages']}))
         handoffs = [m for m in result['messages'] if m.name == 'plan_handoff']
         self.assertEqual(len(handoffs), 2)
         self.assertNotEqual(handoffs[0].id, handoffs[1].id)
