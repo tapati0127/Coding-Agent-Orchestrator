@@ -117,7 +117,16 @@ def build_graph(config_path: str | Path = CONFIG_ROOT / 'plan.yaml', *,
         workflow.add_node('request_plan_feedback', request_plan_feedback)
         workflow.add_node('assess_plan_approval', build_plan_approval_agent(**llm_options))
         workflow.add_node('prepare_plan_revision', prepare_plan_revision)
-        workflow.add_conditional_edges('plan', lambda s: 'request_plan_feedback' if s['status'] == 'planned' else END, ['request_plan_feedback', END])
+        def route_plan(state: PlanState):
+            if state['status'] != 'planned':
+                return END
+            # Initial acceptance authorizes bounded recovery replans too.
+            if state.get('plan_approval', {}).get('ready_for_execute') is True:
+                return 'announce_execution'
+            return 'request_plan_feedback'
+
+        workflow.add_conditional_edges('plan', route_plan,
+            ['request_plan_feedback', 'announce_execution', END])
         workflow.add_edge('request_plan_feedback', 'assess_plan_approval')
         workflow.add_conditional_edges('assess_plan_approval', lambda s:
             'announce_execution' if s['status'] == 'approved_for_execute' else

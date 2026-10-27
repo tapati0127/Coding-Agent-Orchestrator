@@ -1,0 +1,159 @@
+{
+  "repository": "https://github.com/langchain-ai/langchain-skills",
+  "commit": "126c384d8552dcb476b226c244172186cc3f4328",
+  "downloaded_at_utc": "2026-10-26T17:24:41.002570+00:00",
+  "skills": [
+    {
+      "name": "ecosystem-primer",
+      "repository": "https://github.com/langchain-ai/langchain-skills",
+      "commit": "126c384d8552dcb476b226c244172186cc3f4328",
+      "upstream_path": "config/skills/ecosystem-primer",
+      "upstream_skill_sha256": "cc786e2a06096142f93bda47bd9e9419338b21fead8d5c3d7b997cef43ed32cb",
+      "local_path": "skills/vendor/langchain-skills/ecosystem-primer",
+      "adapted": false,
+      "local_skill_sha256": "cc786e2a06096142f93bda47bd9e9419338b21fead8d5c3d7b997cef43ed32cb",
+      "files_sha256": {
+        "SKILL.md": "cc786e2a06096142f93bda47bd9e9419338b21fead8d5c3d7b997cef43ed32cb"
+      }
+    },
+    {
+      "name": "langchain-dependencies",
+      "repository": "https://github.com/langchain-ai/langchain-skills",
+      "commit": "126c384d8552dcb476b226c244172186cc3f4328",
+      "upstream_path": "config/skills/langchain-dependencies",
+      "upstream_skill_sha256": "e099bf710d55bac77bdb3aa3e0b76e3da249f0ba910f37ba6a87c524d14dd8bf",
+      "local_path": "skills/vendor/langchain-skills/langchain-dependencies",
+      "adapted": false,
+      "local_skill_sha256": "e099bf710d55bac77bdb3aa3e0b76e3da249f0ba910f37ba6a87c524d14dd8bf",
+      "files_sha256": {
+        "SKILL.md": "e099bf710d55bac77bdb3aa3e0b76e3da249f0ba910f37ba6a87c524d14dd8bf"
+      }
+    },
+    {
+      "name": "langgraph-cli",
+      "repository": "https://github.com/langchain-ai/langchain-skills",
+      "commit": "126c384d8552dcb476b226c244172186cc3f4328",
+      "upstream_path": "config/skills/langgraph-cli",
+      "upstream_skill_sha256": "59bfeb9204cf63a22b117f01b0c581b5f99d63d0720df35c2fb0fafcbd92f344",
+      "local_path": "skills/vendor/langchain-skills/langgraph-cli",
+      "adapted": false,
+      "local_skill_sha256": "59bfeb9204cf63a22b117f01b0c581b5f99d63d0720df35c2fb0fafcbd92f344",
+      "files_sha256": {
+        "SKILL.md": "59bfeb9204cf63a22b117f01b0c581b5f99d63d0720df35c2fb0fafcbd92f344"
+      }
+    },
+    {
+      "name": "langgraph-decision-models",
+      "repository": "https://github.com/langchain-ai/langchain-skills",
+      "commit": "126c384d8552dcb476b226c244172186cc3f4328",
+      "upstream_path": "config/skills/langgraph-decision-models",
+      "upstream_skill_sha256": "aed6f94f1b4e9ac841b4929e7f497229d59095c6e61ea28c4f1257af3bbea9cd",
+      "local_path": "skills/vendor/langchain-skills/langgraph-decision-models",
+      "adapted": false,
+      "local_skill_sha256": "aed6f94f1b4e9ac841b4929e7f497229d59095c6e61ea28c4f1257af3bbea9cd",
+      "files_sha256": {
+        "SKILL.md": "aed6f94f1b4e9ac841b4929e7f497229d59095c6e61ea28c4f1257af3bbea9cd",
+        "references/conversion-playbook.md": "e3b7191adaadc6e08aca681535257dd62efc10c1b8e4b60a81877b2cac409726"
+      }
+    },
+    {
+      "name": "langgraph-fundamentals",
+      "repository": "https://github.com/langchain-ai/langchain-skills",
+      "commit": "126c384d8552dcb476b226c244172186cc3f4328",
+      "upstream_path": "config/skills/langgraph-fundamentals",
+      "upstream_skill_sha256": "193bea142c9df04abc44917fb96c0be53ec9b5c77f56670004d3c03c117fb990",
+      "local_path": "skills/vendor/langchain-skills/langgraph-fundamentals",
+      "adapted": false,
+      "local_skill_sha256": "193bea142c9df04abc44917fb96c0be53ec9b5c77f56670004d3c03c117fb990",
+      "files_sha256": {
+        "SKILL.md": "193bea142c9df04abc44917fb96c0be53ec9b5c77f56670004d3c03c117fb990",
+        "references/python.md": "3d30871a6463f955452fdebe607248c39b6806cf07c0fe655e3783b48acc6d91",
+        "references/typescript.md": "8cf8577265a75a1e46a5e1dfc7599c63efb60059591593dbb92dbd51acd5d22a"
+      }
+    },
+    {
+      "name": "langgraph-human-in-the-loop",
+      "repository": "https://github.com/langchain-ai/langchain-skills",
+      "commit": "126c384d8552dcb476b226c244172186cc3f4328",
+      "upstream_path": "config/skills/langgraph-human-in-the-loop",
+      "upstream_skill_sha256": "ce56e8ce58548dd1d7cb0d3e524cf546cef0c712e3c35d63fdd4ae354b40d3c1",
+      "local_path": "skills/vendor/langchain-skills/langgraph-human-in-the-loop",
+      "adapted": false,
+      "local_skill_sha256": "ce56e8ce58548dd1d7cb0d3e524cf546cef0c712e3c35d63fdd4ae354b40d3c1",
+      "files_sha256": {
+        "SKILL.md": "ce56e8ce58548dd1d7cb0d3e524cf546cef0c712e3c35d63fdd4ae354b40d3c1"
+      }
+    },
+    {
+      "name": "langgraph-persistence",
+      "repository": "https://github.com/langchain-ai/langchain-skills",
+      "commit": "126c384d8552dcb476b226c244172186cc3f4328",
+      "upstream_path": "config/skills/langgraph-persistence",
+      "upstream_skill_sha256": "0a9a4f36e6d7895a273ce0882655e57023d2d992d4fde8e033e2936ac1df789e",
+      "local_path": "skills/vendor/langchain-skills/langgraph-persistence",
+      "adapted": false,
+      "local_skill_sha256": "0a9a4f36e6d7895a273ce0882655e57023d2d992d4fde8e033e2936ac1df789e",
+      "files_sha256": {
+        "SKILL.md": "0a9a4f36e6d7895a273ce0882655e57023d2d992d4fde8e033e2936ac1df789e"
+      }
+    },
+    {
+      "name": "langgraph-python-quickstart",
+      "repository": "https://github.com/langchain-ai/langchain-skills",
+      "commit": "126c384d8552dcb476b226c244172186cc3f4328",
+      "upstream_path": "config/skills/langgraph-python-quickstart",
+      "upstream_skill_sha256": "0f111b6d23be0fe1279217ddee83117cd533467428e0302b339538aa031d35ab",
+      "local_path": "skills/vendor/langchain-skills/langgraph-python-quickstart",
+      "adapted": false,
+      "local_skill_sha256": "0f111b6d23be0fe1279217ddee83117cd533467428e0302b339538aa031d35ab",
+      "files_sha256": {
+        "SKILL.md": "0f111b6d23be0fe1279217ddee83117cd533467428e0302b339538aa031d35ab"
+      }
+    },
+    {
+      "name": "langgraph-typescript-quickstart",
+      "repository": "https://github.com/langchain-ai/langchain-skills",
+      "commit": "126c384d8552dcb476b226c244172186cc3f4328",
+      "upstream_path": "config/skills/langgraph-typescript-quickstart",
+      "upstream_skill_sha256": "fb6382b2927a7fde0de2071c98c1c800a66cd9378bdc19c72eaaa27743e687d0",
+      "local_path": "skills/vendor/langchain-skills/langgraph-typescript-quickstart",
+      "adapted": false,
+      "local_skill_sha256": "fb6382b2927a7fde0de2071c98c1c800a66cd9378bdc19c72eaaa27743e687d0",
+      "files_sha256": {
+        "SKILL.md": "fb6382b2927a7fde0de2071c98c1c800a66cd9378bdc19c72eaaa27743e687d0"
+      }
+    }
+  ],
+  "additional_files": [
+    {
+      "local_path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/langchain-ai/langchain-skills/126c384d8552dcb476b226c244172186cc3f4328/LICENSE",
+      "sha256": "4ec67e4ca6e6721dba849b2ca82261597c86a61ee214bbf21416006b7b2d0478",
+      "bytes": 1067
+    },
+    {
+      "local_path": "UPSTREAM_README.md",
+      "url": "https://raw.githubusercontent.com/langchain-ai/langchain-skills/126c384d8552dcb476b226c244172186cc3f4328/README.md",
+      "sha256": "881cb5b6217c43b51e657d5ef3d17c1bca1774b9b86fb57c93360d02b2b9f6f3",
+      "bytes": 6089
+    },
+    {
+      "local_path": "docs/python-quickstart.md",
+      "url": "https://docs.langchain.com/oss/python/langgraph/quickstart.md",
+      "sha256": "88c94bd46219c4e6c06abe86f309f8f55107b41b982cab52d449b5565ccd459e",
+      "bytes": 22434
+    },
+    {
+      "local_path": "docs/typescript-quickstart.md",
+      "url": "https://docs.langchain.com/oss/javascript/langgraph/quickstart.md",
+      "sha256": "642c5bc375757ef808d99146f43b013abbcc7187ac7c863cfb5af05883756b1f",
+      "bytes": 23185
+    },
+    {
+      "local_path": "docs/llms.txt",
+      "url": "https://docs.langchain.com/llms.txt",
+      "sha256": "e0229db18328ba34d2cfddd9167b0a7d90fc4d774a8e6809508bc8c15acb09e6",
+      "bytes": 3129
+    }
+  ]
+}

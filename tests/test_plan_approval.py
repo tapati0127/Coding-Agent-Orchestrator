@@ -109,3 +109,51 @@ class PlanApprovalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cli.call_count, 1)
         self.plan_chat.return_value.with_structured_output.return_value.ainvoke.assert_awaited_once()
         self.assertEqual(sum(m.name == 'plan' for m in result['messages']), 1)
+
+    async def test_execute_failure_replans_without_another_user_approval(self):
+        completed = self.executor_factory.return_value.ainvoke.return_value
+        self.executor_factory.return_value.ainvoke.side_effect = [
+            {'status': 'failed', 'output': 'Build failed', 'error': 'Fix build',
+             'assessment': {'status': 'fail'}}, completed]
+        await self.start()
+        result = await self.workflow.ainvoke(Command(resume='Đồng ý'), self.config)
+        self.assertEqual(result['status'], 'completed')
+        self.assertNotIn('__interrupt__', result)
+        self.assertEqual(result['replan_count'], 1)
+        self.assertEqual(self.cli.call_count, 2)
+        self.assertEqual(self.executor_factory.return_value.ainvoke.await_count, 2)
+        self.reviewer_factory.return_value.ainvoke.assert_awaited_once()
+        self.assessor.ainvoke.assert_awaited_once()
+        self.initial.return_value.ainvoke.assert_awaited_once()
+        self.assertEqual((await self.workflow.aget_state(self.config)).next, ())
+
+    async def test_review_failure_replans_without_another_user_approval(self):
+        completed = self.reviewer_factory.return_value.ainvoke.return_value
+        self.reviewer_factory.return_value.ainvoke.side_effect = [
+            {'status': 'failed', 'output': 'Regression', 'error': 'Fix regression',
+             'assessment': {'status': 'fail'}}, completed]
+        await self.start()
+        result = await self.workflow.ainvoke(Command(resume='Đồng ý'), self.config)
+        self.assertEqual(result['status'], 'completed')
+        self.assertNotIn('__interrupt__', result)
+        self.assertEqual(result['replan_count'], 1)
+        self.assertEqual(self.cli.call_count, 2)
+        self.assertEqual(self.reviewer_factory.return_value.ainvoke.await_count, 2)
+        self.assessor.ainvoke.assert_awaited_once()
+
+    async def test_exhausted_replans_end_without_asking_again_or_starting_more_work(self):
+        self.executor_factory.return_value.ainvoke.return_value = {
+            'status': 'failed', 'output': 'Blocked', 'error': 'Cannot build',
+            'assessment': {'status': 'fail'}}
+        await self.start()
+        result = await self.workflow.ainvoke(Command(resume='Đồng ý'), self.config)
+        self.assertEqual(result['status'], 'failed')
+        self.assertNotIn('__interrupt__', result)
+        self.assertEqual(result['replan_count'], 2)
+        self.assertEqual(len(result['execution_history']), 3)
+        self.assertEqual(self.cli.call_count, 3)
+        self.assertEqual(self.executor_factory.return_value.ainvoke.await_count, 3)
+        self.assertIn('replan limit reached (2)', result['error'])
+        self.reviewer_factory.return_value.ainvoke.assert_not_awaited()
+        self.assessor.ainvoke.assert_awaited_once()
+        self.assertEqual((await self.workflow.aget_state(self.config)).next, ())

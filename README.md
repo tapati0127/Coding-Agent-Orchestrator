@@ -143,8 +143,11 @@ Plan hiển thị thông báo tiến độ bằng code, giữ báo cáo CLI tron
 chỉ phát một thông báo kết quả kèm artifact DAG đã validate. Sau đó graph dừng
 ở `interrupt()` chờ người dùng duyệt. Phản hồi được đánh giá bằng
 `short_explanation`, `ready_for_execute`: false quay lại Plan cùng góp ý và kế
-hoạch trước; true mới chạy Execute. Mỗi kế hoạch mới, kể cả replan sau lỗi thực
-thi, đều cần duyệt lại. Lượt sửa theo góp ý không tiêu hao `max_replans`.
+hoạch trước; true mới chạy Execute. Trước lần chấp nhận đầu tiên, mỗi bản sửa
+theo góp ý đều hỏi duyệt lại và không tiêu hao `max_replans`. Sau khi đã chấp
+nhận, các replan do lỗi Execute/Reviewer/tích hợp tự chạy trong phạm vi đã duyệt
+và giới hạn `max_replans`, không hỏi lại. Hoàn thành hoặc hết lượt thì tổng kết
+và END; không tự mở thêm vòng làm việc.
 
 Chạy Python trực tiếp cần checkpointer và cùng `thread_id` để resume:
 
@@ -396,6 +399,12 @@ hai skills Superpowers từ [obra/superpowers](https://github.com/obra/superpowe
 Bản vendored có license, commit/hash nguồn và ghi chú điều chỉnh ở
 `skills/sources.json`. Skills đã được giới hạn theo task: runtime vẫn quản lý
 commit/merge và dispatch, không tự chạy vòng chờ hỏi đáp trong CLI.
+
+Bộ [LangGraph offline](skills/vendor/langchain-skills/README.md) lưu toàn bộ
+7 skill `langgraph-*` từ `langchain-ai/langchain-skills`, kèm 2 skill nền,
+references và bản Markdown của quickstart Python/TypeScript. Commit nguồn,
+license và checksum nằm cùng snapshot; đọc trực tiếp khi không có mạng hoặc
+chọn skill cần thiết qua YAML CLI theo role.
 
 Role được truyền tự động từ agent vào runner; đổi `cli` trong YAML role vẫn giữ
 đúng lựa chọn skills cho backend đó. Initialize chỉ dùng ChatOpenAI nên không

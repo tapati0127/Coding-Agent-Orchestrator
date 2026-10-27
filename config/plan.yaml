@@ -75,6 +75,12 @@ structure_prompt: |
   tạo task giả để vượt validator hoặc coi graph rỗng là hoàn tất công việc.
 
 replan_prompt: |
+  Kế hoạch ban đầu đã được người dùng chấp nhận. Chỉ sửa lỗi/phần chưa hoàn tất
+  trong mục tiêu và phạm vi đã duyệt; không mở thêm công việc ngoài phạm vi.
+  Runtime tự thực thi kế hoạch sửa trong giới hạn max_replans, không hỏi duyệt
+  lại hay tự mở vòng làm việc mới khi hết lượt. Nếu không thể phục hồi bằng
+  thông tin/quyền hiện có, báo blocker; không tự chờ hỏi đáp tương tác.
+
   Công việc đã được Reviewer duyệt (JSON):
   $approved_work
 

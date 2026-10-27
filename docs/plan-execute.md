@@ -549,7 +549,8 @@ nhưng người dùng vẫn thấy đầy đủ phần lời và artifact trong 
 
 ## Duyệt kế hoạch trước Execute
 
-Sau mỗi Plan thành công, `request_plan_feedback` gọi `interrupt()` với câu hỏi
+Trước lần chấp nhận đầu tiên, mỗi Plan thành công dẫn tới
+`request_plan_feedback` gọi `interrupt()` với câu hỏi
 và DAG hiện tại. Node này không chạy CLI/model, nên resume không lặp tác vụ.
 Caller gửi `Command(resume="phản hồi người dùng")` trên cùng thread/checkpointer.
 `assess_plan_approval` dùng cấu hình `config/plan_approval.yaml` tạo
@@ -557,8 +558,10 @@ Caller gửi `Command(resume="phản hồi người dùng")` trên cùng thread/
 Đồng ý thì chuyển Execute; yêu cầu sửa/chưa rõ thì tăng `plan_revision`, gửi
 kế hoạch trước, phản hồi và lý do đánh giá cho Plan rồi hỏi duyệt lại.
 Lỗi structured approval dừng failed và không chạy Execute. Chỉnh theo góp ý
-không dùng ngân sách `max_replans`; technical replan vẫn phải hỏi duyệt kế
-hoạch mới. `dispatch_execute=False` giữ chế độ chỉ lập kế hoạch, không interrupt.
+không dùng ngân sách `max_replans`. Sau khi `plan_approval.ready_for_execute`
+là true, technical replan do lỗi chạy thẳng tới Execute, không interrupt hoặc
+gọi lại model đánh giá duyệt. Chỉ sửa trong phạm vi đã chấp nhận; hoàn tất hoặc
+hết `max_replans` thì tổng kết và END, không tự mở vòng mới. `dispatch_execute=False` giữ chế độ chỉ lập kế hoạch, không interrupt.
 Chạy Python trực tiếp truyền `checkpointer` vào `build_graph()`; graph mặc định
 trên LangGraph Server dùng checkpoint do server quản lý. Xem ví dụ resume trong README.
 
